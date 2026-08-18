@@ -66,7 +66,7 @@ function FacultyDashboardContent() {
     if (!lectureId || !facultyId) return;
     
     // Fetch LiveKit token
-    fetch(`http://localhost:8000/api/lectures/${lectureId}/token?faculty_id=${facultyId}`)
+    fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId}/token?faculty_id=${facultyId}`)
       .then(res => res.json())
       .then(data => {
         if (data.token) setToken(data.token);
@@ -75,7 +75,7 @@ function FacultyDashboardContent() {
       .catch(err => setError(err.message));
 
     // Connect to SSE for events
-    const eventSource = new EventSource(`http://localhost:8000/api/lectures/${lectureId}/events`);
+    const eventSource = new EventSource(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId}/events`);
     
     eventSource.onmessage = (e) => {
       const data = JSON.parse(e.data);
@@ -153,7 +153,7 @@ function FacultyDashboardContent() {
     if (!confirm("Are you sure you want to end this lecture?")) return;
     
     try {
-      const res = await fetch(`http://localhost:8000/api/lectures/${lectureId}/end`, {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId}/end`, {
         method: "POST"
       });
       if (res.ok) {
@@ -229,7 +229,7 @@ function FacultyDashboardContent() {
             video={false}
             audio={false}
             token={token}
-            serverUrl="ws://localhost:7880"
+            serverUrl={process.env.NEXT_PUBLIC_LIVEKIT_URL || "ws://localhost:7880"}
             connect={true}
             className="flex-1 flex flex-col"
             onDisconnected={() => console.error("LiveKitRoom disconnected")}
@@ -347,7 +347,7 @@ function BroadcastControl({ lectureId }: { lectureId: string }) {
         setScreenTrack(track);
 
         // Update status to LIVE
-        fetch(`http://localhost:8000/api/lectures/${lectureId}/status`, {
+        fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId}/status`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ status: "LIVE" })
@@ -370,7 +370,7 @@ function BroadcastControl({ lectureId }: { lectureId: string }) {
       setScreenTrack(null);
       
       // Update status to WAITING
-      fetch(`http://localhost:8000/api/lectures/${lectureId}/status`, {
+      fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId}/status`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: "WAITING" })

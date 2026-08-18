@@ -13,6 +13,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 import redis.asyncio as redis
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from database import engine, Base, get_db, SessionLocal
 import models, schemas
@@ -23,13 +26,20 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Lectra API")
 
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+allow_origins = [url.strip() for url in FRONTEND_URL.split(",") if url.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
 
 LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "devkey")
 LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "lectra_super_secret_key_1234567890_!")

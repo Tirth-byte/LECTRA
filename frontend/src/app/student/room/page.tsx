@@ -26,7 +26,8 @@ function StudentViewerContent() {
   const reportPresence = useCallback(async (eventType: "VIEWING" | "AWAY" | "LEAVE", reason?: string) => {
     if (!lectureId || !studentId) return;
     try {
-      await fetch(`http://localhost:8000/api/lectures/${lectureId}/presence?student_id=${studentId}`, {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      await fetch(`${apiUrl}/api/lectures/${lectureId}/presence?student_id=${studentId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ event_type: eventType, reason: reason })
@@ -60,7 +61,8 @@ function StudentViewerContent() {
 
   useEffect(() => {
     // SSE for status updates
-    const eventSource = new EventSource(`http://localhost:8000/api/lectures/${lectureId}/events`);
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    const eventSource = new EventSource(`${apiUrl}/api/lectures/${lectureId}/events`);
     
     eventSource.onmessage = (e) => {
       const data = JSON.parse(e.data);
@@ -96,7 +98,7 @@ function StudentViewerContent() {
     const heartbeatInterval = setInterval(() => {
       const state = actualStateRef.current || "AWAY";
       if (!lectureId || !studentId) return;
-      fetch(`http://localhost:8000/api/lectures/${lectureId}/heartbeat?student_id=${studentId}`, {
+      fetch(`${apiUrl}/api/lectures/${lectureId}/heartbeat?student_id=${studentId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ state })
@@ -111,7 +113,7 @@ function StudentViewerContent() {
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
       clearInterval(heartbeatInterval);
       
-      fetch(`http://localhost:8000/api/lectures/${lectureId}/presence?student_id=${studentId}`, {
+      fetch(`${apiUrl}/api/lectures/${lectureId}/presence?student_id=${studentId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ event_type: "LEAVE" }),
@@ -170,7 +172,7 @@ function StudentViewerContent() {
           video={false}
           audio={false}
           token={token}
-          serverUrl="ws://localhost:7880"
+          serverUrl={process.env.NEXT_PUBLIC_LIVEKIT_URL || "ws://localhost:7880"}
           connect={true}
           className="w-full h-full flex flex-col items-center justify-center bg-black"
           onDisconnected={() => console.error("LiveKitRoom disconnected")}
