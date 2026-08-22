@@ -144,11 +144,27 @@ function FacultyDashboardContent() {
   const lastSystemNotificationRef = useRef<Record<string, { type: string; reason?: string; time: number }>>({});
   const originalTitleRef = useRef<string>("Lectra - Faculty Room");
 
+  // Register service worker on mount for reliable OS notifications
   useEffect(() => {
     if (typeof window !== "undefined") {
       originalTitleRef.current = document.title || "Lectra - Faculty Room";
       if ("Notification" in window) {
+        console.log("[NOTIFICATION] supported:", true);
+        console.log("[NOTIFICATION] initial permission:", Notification.permission);
         setNotificationPermission(Notification.permission);
+      } else {
+        console.log("[NOTIFICATION] supported:", false);
+      }
+
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker
+          .register("/sw.js")
+          .then((reg) => {
+            console.log("[SERVICE_WORKER] registered successfully with scope:", reg.scope);
+          })
+          .catch((err) => {
+            console.warn("[SERVICE_WORKER] registration failed:", err);
+          });
       }
     }
   }, []);
@@ -156,7 +172,9 @@ function FacultyDashboardContent() {
   const requestPermission = async () => {
     if (typeof window !== "undefined" && "Notification" in window) {
       try {
+        console.log("[NOTIFICATION] requesting permission from user...");
         const result = await Notification.requestPermission();
+        console.log("[NOTIFICATION] permission result:", result);
         setNotificationPermission(result);
       } catch (err) {
         console.error("Failed to request permission", err);
@@ -164,14 +182,72 @@ function FacultyDashboardContent() {
     }
   };
 
+  // Robust native system notification helper
+  const showNativeOSNotification = useCallback(async (title: string, options: NotificationOptions) => {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      console.warn("[NOTIFICATION] unsupported");
+      return false;
+    }
+
+    if (Notification.permission !== "granted") {
+      console.warn("[NOTIFICATION] permission not granted:", Notification.permission);
+      return false;
+    }
+
+    try {
+      if ("serviceWorker" in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg) {
+          await reg.showNotification(title, options);
+          console.log("[NOTIFICATION] shown using service worker:", title);
+          return true;
+        }
+      }
+
+      const notif = new Notification(title, options);
+      console.log("[NOTIFICATION] shown using Notification constructor:", title);
+      notif.onclick = () => {
+        window.focus();
+        notif.close();
+      };
+      return true;
+    } catch (err) {
+      console.error("[NOTIFICATION] failed to display native notification:", err);
+      return false;
+    }
+  }, []);
+
+  // Helper: Test Native Notification
+  const triggerTestNotification = async () => {
+    console.log("[NOTIFICATION] test button clicked");
+    console.log("[NOTIFICATION] permission:", Notification.permission);
+    console.log("[NOTIFICATION] visibility:", document.visibilityState);
+    console.log("[NOTIFICATION] focused:", document.hasFocus());
+
+    if (Notification.permission !== "granted") {
+      await requestPermission();
+    }
+    
+    await showNativeOSNotification("LECTRA Test", {
+      body: "System notifications are working outside the browser window.",
+      icon: "/favicon.ico",
+      tag: `lectra-test-${Date.now()}`,
+      requireInteraction: false,
+    });
+  };
+
   // Dispatch Native System Notification (Cross-App when tab is not focused/visible)
   const triggerSystemNotification = useCallback((event: StudentEvent) => {
     if (typeof window === "undefined") return;
 
     try {
-      const isTabActive = document.visibilityState === "visible" && document.hasFocus();
+      const isVisible = document.visibilityState === "visible";
+      const isFocused = document.hasFocus();
+      const isBackground = !isVisible || !isFocused;
+
+      console.log(`[NOTIFICATION] incoming event: type=${event.type}, student=${event.student_name}, background=${isBackground} (visible=${isVisible}, focused=${isFocused})`);
       
-      if (!isTabActive) {
+      if (isBackground) {
         const reasonLabel = event.type === "AWAY"
           ? event.reason === "PAGE_HIDDEN" ? "switched tabs" : event.reason === "FULLSCREEN_EXITED" ? "exited Focus Mode" : "left window"
           : event.type === "VIEWING" ? "returned" : event.type.toLowerCase();
@@ -180,6 +256,7 @@ function FacultyDashboardContent() {
         const now = Date.now();
         const last = lastSystemNotificationRef.current[event.student_id];
         if (last && last.type === event.type && last.reason === event.reason && (now - last.time < 3000)) {
+          console.log(`[NOTIFICATION] deduplicated repeat event for ${event.student_name}`);
           return;
         }
         lastSystemNotificationRef.current[event.student_id] = {
@@ -188,56 +265,50 @@ function FacultyDashboardContent() {
           time: now
         };
 
-        if ("Notification" in window && Notification.permission === "granted") {
-          let title = "LECTRA Focus Alert";
-          let body = `${event.student_name} changed activity`;
+        let title = "LECTRA";
+        let body = `${event.student_name} changed activity`;
 
-          if (event.type === "AWAY") {
-            if (event.reason === "PAGE_HIDDEN") {
-              title = `⚠ ${event.student_name} switched tabs`;
-              body = `${event.student_name} left the lecture to view another tab or app.`;
-            } else if (event.reason === "FULLSCREEN_EXITED") {
-              title = `⚠ ${event.student_name} exited Focus Mode`;
-              body = `${event.student_name} minimized or left fullscreen view.`;
-            } else if (event.reason === "WINDOW_BLURRED") {
-              title = `⚠ ${event.student_name} left lecture window`;
-              body = `${event.student_name} switched focus to another desktop window.`;
-            } else {
-              title = `⚠ ${event.student_name} switched away`;
-              body = `Student is no longer actively watching the stream.`;
-            }
-          } else if (event.type === "DISCONNECTED") {
-            title = `✕ ${event.student_name} disconnected`;
-            body = `Student lost connection to the lecture broadcast.`;
-          } else if (event.type === "JOIN") {
-            title = `● ${event.student_name} joined`;
-            body = `Student joined lecture ${lectureId.toUpperCase()}`;
-          } else if (event.type === "VIEWING" && event.durationStr) {
-            title = `✓ ${event.student_name} returned`;
-            body = `Student resumed watching the broadcast.`;
+        if (event.type === "AWAY") {
+          if (event.reason === "PAGE_HIDDEN") {
+            title = "LECTRA";
+            body = `${event.student_name} switched tabs`;
+          } else if (event.reason === "FULLSCREEN_EXITED") {
+            title = "LECTRA";
+            body = `${event.student_name} exited Focus Mode`;
+          } else if (event.reason === "WINDOW_BLURRED") {
+            title = "LECTRA";
+            body = `${event.student_name} left lecture window`;
           } else {
-            return;
+            title = "LECTRA";
+            body = `${event.student_name} switched away`;
           }
-
-          const notification = new Notification(title, {
-            body,
-            icon: "/favicon.ico",
-            tag: `lectra-${event.student_id}-${event.type}`,
-            requireInteraction: false
-          });
-
-          notification.onclick = () => {
-            window.focus();
-            notification.close();
-          };
+        } else if (event.type === "DISCONNECTED") {
+          title = "LECTRA";
+          body = `${event.student_name} disconnected from the lecture`;
+        } else if (event.type === "JOIN") {
+          title = "LECTRA";
+          body = `${event.student_name} joined the lecture`;
+        } else if (event.type === "VIEWING" && event.durationStr) {
+          title = "LECTRA";
+          body = `${event.student_name} returned to lecture`;
+        } else {
+          return;
         }
+
+        console.log(`[NOTIFICATION] attempting OS notification: "${title}: ${body}"`);
+        showNativeOSNotification(title, {
+          body,
+          icon: "/favicon.ico",
+          tag: `lectra-${lectureId}-${event.student_id}-${event.type}`,
+          requireInteraction: false
+        });
       } else {
         document.title = originalTitleRef.current;
       }
     } catch (err) {
       console.warn("Could not dispatch notification safely", err);
     }
-  }, [lectureId]);
+  }, [lectureId, showNativeOSNotification]);
 
   useEffect(() => {
     const handleFocus = () => {
@@ -525,8 +596,8 @@ function FacultyDashboardContent() {
             </div>
           </div>
 
-          {/* Permission Status Indicator */}
-          <div className="relative hidden sm:flex items-center">
+          {/* Permission Status Indicator & Test Button */}
+          <div className="relative hidden sm:flex items-center space-x-3">
             {notificationPermission === "granted" ? (
               <div className="flex items-center space-x-1.5 px-3 py-1 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/40 text-emerald-700 dark:text-emerald-300 rounded-full text-xs font-medium">
                 <Bell className="w-3.5 h-3.5" />
@@ -571,6 +642,14 @@ function FacultyDashboardContent() {
                 <span>Enable OS Alerts</span>
               </button>
             )}
+
+            <button
+              type="button"
+              onClick={triggerTestNotification}
+              className="px-2.5 py-1 text-xs font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition border border-gray-200 dark:border-gray-700"
+            >
+              Test OS Notification
+            </button>
           </div>
         </div>
 
