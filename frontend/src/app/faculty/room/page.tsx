@@ -144,6 +144,29 @@ function FacultyDashboardContent() {
   const lastSystemNotificationRef = useRef<Record<string, { type: string; reason?: string; time: number }>>({});
   const originalTitleRef = useRef<string>("Lectra - Faculty Room");
 
+  // Diagnostic Panel State
+  const [diagState, setDiagState] = useState<{
+    swActive: boolean;
+    swController: boolean;
+    pushSupported: boolean;
+    subActive: boolean;
+    endpointHost: string;
+    backendRegistered: boolean;
+    lastServerPushResult: string;
+    lastPushEventReceived: string;
+  }>({
+    swActive: false,
+    swController: false,
+    pushSupported: false,
+    subActive: false,
+    endpointHost: "none",
+    backendRegistered: false,
+    lastServerPushResult: "none",
+    lastPushEventReceived: "never",
+  });
+
+  const [showDiagPanel, setShowDiagPanel] = useState(false);
+
   // VAPID Public Key helper
   const urlBase64ToUint8Array = (base64String: string) => {
     const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
@@ -154,6 +177,69 @@ function FacultyDashboardContent() {
       outputArray[i] = rawData.charCodeAt(i);
     }
     return outputArray;
+  };
+
+  // Check and refresh diagnostics
+  const refreshDiagnostics = useCallback(async () => {
+    if (typeof window === "undefined") return;
+
+    const pushSupported = "serviceWorker" in navigator && "PushManager" in window;
+    let swActive = false;
+    let swController = !!navigator.serviceWorker?.controller;
+    let subActive = false;
+    let endpointHost = "none";
+
+    try {
+      if ("serviceWorker" in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        swActive = !!reg?.active;
+        if (reg && "pushManager" in reg) {
+          const sub = await reg.pushManager.getSubscription();
+          if (sub) {
+            subActive = true;
+            try {
+              endpointHost = new URL(sub.endpoint).host;
+            } catch {
+              endpointHost = "valid-endpoint";
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[DIAG] Error reading service worker/subscription:", err);
+    }
+
+    setDiagState(prev => ({
+      ...prev,
+      swActive,
+      swController,
+      pushSupported,
+      subActive,
+      endpointHost,
+    }));
+  }, []);
+
+  // Developer Reset Action: Unsubscribe and clear service workers
+  const handleDeveloperReset = async () => {
+    console.log("[PUSH RESET] starting developer reset...");
+    try {
+      if ("serviceWorker" in navigator) {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        for (const reg of registrations) {
+          const sub = await reg.pushManager.getSubscription();
+          if (sub) {
+            await sub.unsubscribe();
+            console.log("[PUSH RESET] unsubscribed push subscription");
+          }
+          await reg.unregister();
+          console.log("[PUSH RESET] unregistered service worker");
+        }
+      }
+      alert("Push subscriptions & Service Worker reset. Page will now reload.");
+      window.location.reload();
+    } catch (err) {
+      console.error("[PUSH RESET] Error resetting push:", err);
+    }
   };
 
   // Subscribe to Web Push on Backend
@@ -200,14 +286,17 @@ function FacultyDashboardContent() {
 
         if (res.ok) {
           console.log("[PUSH] subscription sent to backend successfully");
+          setDiagState(prev => ({ ...prev, backendRegistered: true }));
         } else {
           console.warn("[PUSH] backend failed to store subscription:", res.status);
+          setDiagState(prev => ({ ...prev, backendRegistered: false }));
         }
       }
+      refreshDiagnostics();
     } catch (err) {
       console.error("[PUSH] Error subscribing to Web Push:", err);
     }
-  }, [lectureId, facultyId]);
+  }, [lectureId, facultyId, refreshDiagnostics]);
 
   // Register service worker on mount and sync push subscription
   useEffect(() => {
@@ -226,6 +315,7 @@ function FacultyDashboardContent() {
           .register("/sw.js")
           .then((reg) => {
             console.log("[PUSH] service worker registered with scope:", reg.scope);
+            refreshDiagnostics();
             if (Notification.permission === "granted") {
               subscribeToWebPush();
             }
@@ -233,9 +323,19 @@ function FacultyDashboardContent() {
           .catch((err) => {
             console.warn("[SERVICE_WORKER] registration failed:", err);
           });
+
+        // Listen for messages from sw.js
+        navigator.serviceWorker.addEventListener("message", (event) => {
+          if (event.data?.type === "PUSH_RECEIVED") {
+            setDiagState(prev => ({
+              ...prev,
+              lastPushEventReceived: new Date().toLocaleTimeString(),
+            }));
+          }
+        });
       }
     }
-  }, [subscribeToWebPush]);
+  }, [subscribeToWebPush, refreshDiagnostics]);
 
   const requestPermission = async () => {
     if (typeof window !== "undefined" && "Notification" in window) {
@@ -247,9 +347,40 @@ function FacultyDashboardContent() {
         if (result === "granted") {
           await subscribeToWebPush();
         }
+        refreshDiagnostics();
       } catch (err) {
         console.error("Failed to request permission", err);
       }
+    }
+  };
+
+  // Helper: Trigger True Server-Side Web Push Test
+  const triggerServerPushTest = async () => {
+    console.log("[PUSH] server push test requested");
+    if (Notification.permission !== "granted") {
+      await requestPermission();
+    }
+    
+    // Ensure subscription is sent
+    await subscribeToWebPush();
+
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const res = await fetch(`${apiUrl}/api/lectures/${lectureId.toUpperCase()}/test-push`, {
+        method: "POST",
+      });
+      const data = await res.json();
+      console.log("[PUSH] server push test response:", data);
+      setDiagState(prev => ({
+        ...prev,
+        lastServerPushResult: data.success ? `SUCCESS (code: ${data.deliveries?.[0]?.status_code || 201})` : `FAILED (${data.error || data.deliveries?.[0]?.error || "error"})`,
+      }));
+    } catch (err) {
+      console.error("[PUSH] Error triggering server push test:", err);
+      setDiagState(prev => ({
+        ...prev,
+        lastServerPushResult: "NETWORK_ERROR",
+      }));
     }
   };
 
@@ -287,29 +418,6 @@ function FacultyDashboardContent() {
       return false;
     }
   }, []);
-
-  // Helper: Trigger True Server-Side Web Push Test
-  const triggerServerPushTest = async () => {
-    console.log("[PUSH] server push test requested");
-    if (Notification.permission !== "granted") {
-      await requestPermission();
-    }
-    
-    // Ensure subscription is sent
-    await subscribeToWebPush();
-
-    try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const res = await fetch(`${apiUrl}/api/lectures/${lectureId.toUpperCase()}/push-test`, {
-        method: "POST",
-      });
-      if (res.ok) {
-        console.log("[PUSH] backend queued server-side web push test");
-      }
-    } catch (err) {
-      console.error("[PUSH] Error triggering server push test:", err);
-    }
-  };
 
   // Dispatch Native System Notification (Cross-App when tab is not focused/visible)
   const triggerSystemNotification = useCallback((event: StudentEvent) => {
@@ -725,6 +833,17 @@ function FacultyDashboardContent() {
             >
               Send Test Push
             </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                refreshDiagnostics();
+                setShowDiagPanel(prev => !prev);
+              }}
+              className="px-2.5 py-1 text-xs font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition border border-gray-200 dark:border-gray-700"
+            >
+              {showDiagPanel ? "Hide Diagnostics" : "Diagnostics"}
+            </button>
           </div>
         </div>
 
@@ -736,6 +855,80 @@ function FacultyDashboardContent() {
           End Lecture
         </button>
       </header>
+
+      {/* Temporary Stage-by-Stage Diagnostic Panel */}
+      {showDiagPanel && (
+        <div className="bg-amber-50/80 dark:bg-amber-950/30 border-b border-amber-200/80 dark:border-amber-800/50 px-6 py-3 text-xs text-gray-800 dark:text-gray-200 animate-toast-enter">
+          <div className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3 font-mono">
+              <div>
+                <span className="text-gray-500 block text-[10px] uppercase font-sans">Notification API</span>
+                <span className={typeof window !== "undefined" && "Notification" in window ? "text-emerald-600 dark:text-emerald-400 font-semibold" : "text-red-500 font-semibold"}>
+                  {typeof window !== "undefined" && "Notification" in window ? "supported" : "unsupported"}
+                </span>
+              </div>
+              <div>
+                <span className="text-gray-500 block text-[10px] uppercase font-sans">Permission</span>
+                <span className={notificationPermission === "granted" ? "text-emerald-600 dark:text-emerald-400 font-semibold" : notificationPermission === "denied" ? "text-red-500 font-semibold" : "text-amber-500 font-semibold"}>
+                  {notificationPermission}
+                </span>
+              </div>
+              <div>
+                <span className="text-gray-500 block text-[10px] uppercase font-sans">Service Worker</span>
+                <span className={diagState.swActive ? "text-emerald-600 dark:text-emerald-400 font-semibold" : "text-amber-500 font-semibold"}>
+                  {diagState.swActive ? "active" : "missing"}
+                </span>
+              </div>
+              <div>
+                <span className="text-gray-500 block text-[10px] uppercase font-sans">PushManager</span>
+                <span className={diagState.pushSupported ? "text-emerald-600 dark:text-emerald-400 font-semibold" : "text-red-500 font-semibold"}>
+                  {diagState.pushSupported ? "supported" : "unsupported"}
+                </span>
+              </div>
+              <div>
+                <span className="text-gray-500 block text-[10px] uppercase font-sans">Push Subscription</span>
+                <span className={diagState.subActive ? "text-emerald-600 dark:text-emerald-400 font-semibold" : "text-amber-500 font-semibold"}>
+                  {diagState.subActive ? diagState.endpointHost : "missing"}
+                </span>
+              </div>
+              <div>
+                <span className="text-gray-500 block text-[10px] uppercase font-sans">Backend Stored</span>
+                <span className={diagState.backendRegistered ? "text-emerald-600 dark:text-emerald-400 font-semibold" : "text-gray-400 font-semibold"}>
+                  {diagState.backendRegistered ? "registered" : "pending"}
+                </span>
+              </div>
+              <div>
+                <span className="text-gray-500 block text-[10px] uppercase font-sans">Last Server Push</span>
+                <span className={diagState.lastServerPushResult.includes("SUCCESS") ? "text-emerald-600 dark:text-emerald-400 font-semibold" : diagState.lastServerPushResult.includes("FAIL") ? "text-red-500 font-semibold" : "text-gray-400"}>
+                  {diagState.lastServerPushResult}
+                </span>
+              </div>
+              <div>
+                <span className="text-gray-500 block text-[10px] uppercase font-sans">Last Push Event</span>
+                <span className="text-gray-600 dark:text-gray-300 font-semibold">
+                  {diagState.lastPushEventReceived}
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center space-x-2 shrink-0">
+              <button
+                type="button"
+                onClick={refreshDiagnostics}
+                className="px-2.5 py-1 bg-white dark:bg-[#1a1a1a] hover:bg-gray-100 dark:hover:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-xs font-sans font-medium"
+              >
+                Refresh
+              </button>
+              <button
+                type="button"
+                onClick={handleDeveloperReset}
+                className="px-2.5 py-1 bg-red-100 dark:bg-red-950/40 hover:bg-red-200 text-red-700 dark:text-red-300 border border-red-300 dark:border-red-800 rounded-lg text-xs font-sans font-medium"
+              >
+                Reset Push & SW
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="flex-1 p-6 max-w-7xl mx-auto w-full grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Column: Broadcast Control with stable LiveKit Room */}

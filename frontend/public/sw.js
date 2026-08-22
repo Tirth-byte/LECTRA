@@ -36,9 +36,18 @@ self.addEventListener("push", (event) => {
     requireInteraction: false,
   };
 
+  // Notify client windows of push arrival for diagnostic panel
+  self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
+    for (const client of clientList) {
+      client.postMessage({ type: "PUSH_RECEIVED", timestamp: new Date().toISOString() });
+    }
+  });
+
   event.waitUntil(
     self.registration.showNotification(data.title || "LECTRA", options).then(() => {
       console.log("[PUSH SW] notification displayed:", data.title);
+    }).catch((err) => {
+      console.error("[PUSH SW] showNotification error:", err);
     })
   );
 });

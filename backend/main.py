@@ -612,12 +612,29 @@ def delete_push_subscription(
     return {"status": "ok"}
 
 
-@app.post("/api/lectures/{lecture_id}/push-test")
-def test_push_notification(
+@app.post("/api/lectures/{lecture_id}/test-push")
+def synchronous_test_push(
     lecture_id: str,
-    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
 ):
     lecture_id = lecture_id.upper()
+    subscriptions = (
+        db.query(models.PushSubscription)
+        .filter(
+            models.PushSubscription.lecture_id == lecture_id,
+            models.PushSubscription.active == True,
+        )
+        .all()
+    )
+
+    if not subscriptions:
+        logger.warning("[WEB PUSH] no active subscriptions found for lecture=%s", lecture_id)
+        return {
+            "success": False,
+            "error": "No active subscriptions found for this lecture.",
+            "subscriptions_count": 0,
+        }
+
     test_payload = {
         "title": "LECTRA Test",
         "body": "Cross-app Web Push notifications are working.",
@@ -627,9 +644,55 @@ def test_push_notification(
             "url": f"/faculty/room?lectureId={lecture_id}",
         },
     }
-    background_tasks.add_task(send_web_push_sync, lecture_id, test_payload)
-    logger.info("[PUSH_TEST] queued test web push for lecture=%s", lecture_id)
-    return {"status": "queued"}
+
+    results = []
+    payload_json = json.dumps(test_payload)
+
+    for sub in subscriptions:
+        sub_info = {
+            "endpoint": sub.endpoint,
+            "keys": {
+                "p256dh": sub.p256dh,
+                "auth": sub.auth,
+            },
+        }
+        try:
+            logger.info("[WEB PUSH] sending test push to sub_id=%s endpoint_host=%s", sub.id, sub.endpoint.split("/")[2] if "/" in sub.endpoint else "unknown")
+            response = webpush(
+                subscription_info=sub_info,
+                data=payload_json,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims=VAPID_CLAIMS,
+            )
+            status_code = getattr(response, "status_code", 201)
+            logger.info("[WEB PUSH] provider status=%s for sub_id=%s", status_code, sub.id)
+            results.append({"subscription_id": sub.id, "status_code": status_code, "success": True})
+        except WebPushException as ex:
+            status_code = getattr(getattr(ex, "response", None), "status_code", None)
+            err_msg = str(ex)
+            logger.warning("[WEB PUSH] delivery failed for sub_id=%s status=%s: %s", sub.id, status_code, err_msg)
+            if status_code in (404, 410):
+                sub.active = False
+                db.commit()
+            results.append({"subscription_id": sub.id, "status_code": status_code, "error": err_msg, "success": False})
+        except Exception as ex:
+            logger.exception("[WEB PUSH] unexpected exception sending test push: %s", ex)
+            results.append({"subscription_id": sub.id, "error": str(ex), "success": False})
+
+    all_success = any(r.get("success") for r in results)
+    return {
+        "success": all_success,
+        "subscriptions_count": len(subscriptions),
+        "deliveries": results,
+    }
+
+
+@app.post("/api/lectures/{lecture_id}/push-test")
+def test_push_notification(
+    lecture_id: str,
+    db: Session = Depends(get_db),
+):
+    return synchronous_test_push(lecture_id, db)
 
 
 @app.post("/api/lectures/{lecture_id}/end")
