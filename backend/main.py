@@ -519,81 +519,92 @@ async def lecture_events(lecture_id: str, req: Request):
     channel = f"lecture_events_{lecture_id}"
 
     async def event_generator():
+        client = None
         pubsub = None
-        while True:
-            if await req.is_disconnected():
-                break
+        listener_task = None
+        queue = asyncio.Queue()
 
-            # Connect and subscribe if pubsub is not active
-            if pubsub is None:
+        async def reader(ps):
+            try:
+                async for message in ps.listen():
+                    if message and message.get("type") == "message" and message.get("data") is not None:
+                        logger.info("[REDIS RECEIVE] channel=%s data=%s", channel, message["data"])
+                        await queue.put(message["data"])
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning("[REDIS SUBSCRIBER ERROR] channel=%s: %s", channel, exc)
+
+        try:
+            while True:
+                if await req.is_disconnected():
+                    break
+
+                if pubsub is None:
+                    try:
+                        client = redis.from_url(
+                            REDIS_URL,
+                            decode_responses=True,
+                            health_check_interval=30,
+                            socket_connect_timeout=10,
+                            socket_timeout=10,
+                            socket_keepalive=True,
+                            retry_on_timeout=True,
+                        )
+                        pubsub = client.pubsub()
+                        await pubsub.subscribe(channel)
+                        logger.info("Subscribed to Redis channel %s for SSE client", channel)
+                        listener_task = asyncio.create_task(reader(pubsub))
+                    except Exception as exc:
+                        logger.warning("Failed to subscribe to Redis channel %s: %s. Retrying in 2s...", channel, exc)
+                        if pubsub:
+                            try:
+                                await pubsub.aclose()
+                            except Exception:
+                                pass
+                            pubsub = None
+                        if client:
+                            try:
+                                await client.aclose()
+                            except Exception:
+                                pass
+                            client = None
+                        yield {"data": json.dumps({"type": "PING"})}
+                        await asyncio.sleep(2)
+                        continue
+
+                # Wait for next event or send periodic ping every 1.5s
                 try:
-                    pubsub = redis_client.pubsub()
-                    await pubsub.subscribe(channel)
-                    logger.info("Subscribed to Redis channel %s for SSE client", channel)
-                except (redis.ConnectionError, redis.TimeoutError) as exc:
-                    logger.warning(
-                        "Unable to subscribe to Redis channel %s (%s). Retrying in 2s...",
-                        channel,
-                        exc,
-                    )
-                    if pubsub:
-                        try:
-                            await pubsub.aclose()
-                        except Exception:
-                            pass
-                        pubsub = None
-                    # Send keepalive ping to SSE client while reconnecting
+                    event_data = await asyncio.wait_for(queue.get(), timeout=1.5)
+                    yield {"data": event_data}
+                except asyncio.TimeoutError:
                     yield {"data": json.dumps({"type": "PING"})}
-                    await asyncio.sleep(2)
-                    continue
                 except Exception as exc:
-                    logger.exception("Unexpected error subscribing to Redis channel %s: %s", channel, exc)
-                    if pubsub:
-                        try:
-                            await pubsub.aclose()
-                        except Exception:
-                            pass
-                        pubsub = None
+                    logger.exception("Error in SSE event yield loop for %s: %s", channel, exc)
                     yield {"data": json.dumps({"type": "PING"})}
-                    await asyncio.sleep(2)
-                    continue
 
-            try:
-                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                if message and message.get("data") is not None:
-                    yield {"data": message["data"]}
-                else:
-                    yield {"data": json.dumps({"type": "PING"})}
-            except (redis.ConnectionError, redis.TimeoutError) as exc:
-                logger.warning(
-                    "Redis connection dropped while listening to channel %s: %s. Reconnecting...",
-                    channel,
-                    exc,
-                )
+        finally:
+            if listener_task:
+                listener_task.cancel()
                 try:
+                    await listener_task
+                except asyncio.CancelledError:
+                    pass
+            if pubsub:
+                try:
+                    await pubsub.unsubscribe(channel)
                     await pubsub.aclose()
                 except Exception:
                     pass
-                pubsub = None
-                yield {"data": json.dumps({"type": "PING"})}
-                await asyncio.sleep(1)
-            except Exception as exc:
-                logger.exception("Error reading Redis PubSub message from channel %s: %s", channel, exc)
+            if client:
                 try:
-                    await pubsub.aclose()
+                    await client.aclose()
                 except Exception:
                     pass
-                pubsub = None
-                yield {"data": json.dumps({"type": "PING"})}
-                await asyncio.sleep(1)
+            logger.info("Cleaned up SSE subscription for channel %s", channel)
 
-        # Cleanup on client disconnect
-        if pubsub is not None:
-            try:
-                await pubsub.unsubscribe(channel)
-                await pubsub.aclose()
-                logger.info("Unsubscribed and closed Redis pubsub for channel %s", channel)
-            except Exception as exc:
-                logger.debug("Error cleaning up Redis pubsub for %s: %s", channel, exc)
-
-    return EventSourceResponse(event_generator())
+    response = EventSourceResponse(event_generator())
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Connection"] = "keep-alive"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response

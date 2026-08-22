@@ -33,7 +33,8 @@ function StudentViewerContent() {
       await fetch(`${apiUrl}/api/lectures/${lectureId.toUpperCase()}/presence?student_id=${studentId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ event_type: eventType, reason: reason })
+        body: JSON.stringify({ event_type: eventType, reason: reason }),
+        keepalive: true
       });
     } catch (e) {
       console.error("[STUDENT] failed to report presence", e);
