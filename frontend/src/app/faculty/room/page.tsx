@@ -146,19 +146,21 @@ function FacultyDashboardContent() {
 
   // Diagnostic Panel State
   const [diagState, setDiagState] = useState<{
-    swActive: boolean;
-    swController: boolean;
+    vapidPresent: boolean;
+    swReady: boolean;
     pushSupported: boolean;
     subActive: boolean;
+    subError: string | null;
     endpointHost: string;
     backendRegistered: boolean;
     lastServerPushResult: string;
     lastPushEventReceived: string;
   }>({
-    swActive: false,
-    swController: false,
+    vapidPresent: false,
+    swReady: false,
     pushSupported: false,
     subActive: false,
+    subError: null,
     endpointHost: "none",
     backendRegistered: false,
     lastServerPushResult: "none",
@@ -184,15 +186,16 @@ function FacultyDashboardContent() {
     if (typeof window === "undefined") return;
 
     const pushSupported = "serviceWorker" in navigator && "PushManager" in window;
-    let swActive = false;
-    let swController = !!navigator.serviceWorker?.controller;
+    let swReady = false;
     let subActive = false;
     let endpointHost = "none";
+    const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || "BCWdovh0jjaE521xDcgtCgqW4uxnJ7mklCVKb4-_HNPF3MDeGBxaF0yOsRzN_G_gzwKLWOv6vWJuA2HuggnNhU0";
+    const vapidPresent = !!vapidKey;
 
     try {
       if ("serviceWorker" in navigator) {
         const reg = await navigator.serviceWorker.getRegistration();
-        swActive = !!reg?.active;
+        swReady = !!reg?.active;
         if (reg && "pushManager" in reg) {
           const sub = await reg.pushManager.getSubscription();
           if (sub) {
@@ -211,8 +214,8 @@ function FacultyDashboardContent() {
 
     setDiagState(prev => ({
       ...prev,
-      swActive,
-      swController,
+      vapidPresent,
+      swReady,
       pushSupported,
       subActive,
       endpointHost,
@@ -226,10 +229,14 @@ function FacultyDashboardContent() {
       if ("serviceWorker" in navigator) {
         const registrations = await navigator.serviceWorker.getRegistrations();
         for (const reg of registrations) {
-          const sub = await reg.pushManager.getSubscription();
-          if (sub) {
-            await sub.unsubscribe();
-            console.log("[PUSH RESET] unsubscribed push subscription");
+          try {
+            const sub = await reg.pushManager.getSubscription();
+            if (sub) {
+              await sub.unsubscribe();
+              console.log("[PUSH RESET] unsubscribed push subscription");
+            }
+          } catch (e) {
+            console.warn("[PUSH RESET] could not unsubscribe:", e);
           }
           await reg.unregister();
           console.log("[PUSH RESET] unregistered service worker");
@@ -246,27 +253,48 @@ function FacultyDashboardContent() {
   const subscribeToWebPush = useCallback(async () => {
     if (typeof window === "undefined" || !("serviceWorker" in navigator) || !("PushManager" in window)) {
       console.warn("[PUSH] Web Push not supported in this browser");
+      setDiagState(prev => ({ ...prev, subError: "PushManager not supported" }));
       return;
     }
 
-    try {
-      const reg = await navigator.serviceWorker.ready;
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      
-      const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || "BCWdovh0jjaE521xDcgtCgqW4uxnJ7mklCVKb4-_HNPF3MDeGBxaF0yOsRzN_G_gzwKLWOv6vWJuA2HuggnNhU0";
-      const convertedKey = urlBase64ToUint8Array(vapidPublicKey);
+    const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || "BCWdovh0jjaE521xDcgtCgqW4uxnJ7mklCVKb4-_HNPF3MDeGBxaF0yOsRzN_G_gzwKLWOv6vWJuA2HuggnNhU0";
+    console.log("[PUSH] VAPID public key present:", !!vapidPublicKey);
 
+    try {
+      // 1. Wait for active Service Worker
+      console.log("[PUSH] waiting for serviceWorker.ready...");
+      const reg = await navigator.serviceWorker.ready;
+      if (!reg || !reg.active) {
+        console.warn("[PUSH] Service Worker not active yet");
+        setDiagState(prev => ({ ...prev, swReady: false }));
+        return;
+      }
+      setDiagState(prev => ({ ...prev, swReady: true }));
+
+      // 2. Check Existing Subscription
+      console.log("[PUSH] checking existing subscription...");
       let sub = await reg.pushManager.getSubscription();
-      if (!sub) {
+
+      if (sub) {
+        console.log("[PUSH] existing subscription found:", sub.endpoint.split("/")[2] || "endpoint");
+      } else {
+        console.log("[PUSH] no existing subscription, creating new subscription with VAPID key...");
+        const convertedKey = urlBase64ToUint8Array(vapidPublicKey);
         sub = await reg.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: convertedKey,
         });
-        console.log("[PUSH] subscription created");
-      } else {
-        console.log("[PUSH] existing subscription found");
+        console.log("[PUSH] subscription created successfully");
       }
 
+      setDiagState(prev => ({
+        ...prev,
+        subActive: true,
+        subError: null,
+        endpointHost: new URL(sub!.endpoint).host,
+      }));
+
+      // 3. Register Subscription with Backend
       const subJson = sub.toJSON();
       if (subJson.endpoint && subJson.keys?.p256dh && subJson.keys?.auth && lectureId) {
         const payload = {
@@ -278,6 +306,9 @@ function FacultyDashboardContent() {
           faculty_id: facultyId || "faculty",
         };
 
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+        console.log("[PUSH] sending subscription to backend at:", `${apiUrl}/api/lectures/${lectureId.toUpperCase()}/push-subscriptions`);
+
         const res = await fetch(`${apiUrl}/api/lectures/${lectureId.toUpperCase()}/push-subscriptions`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -285,29 +316,34 @@ function FacultyDashboardContent() {
         });
 
         if (res.ok) {
-          console.log("[PUSH] subscription sent to backend successfully");
+          const respData = await res.json();
+          console.log("[PUSH] subscription stored in backend:", respData);
           setDiagState(prev => ({ ...prev, backendRegistered: true }));
         } else {
-          console.warn("[PUSH] backend failed to store subscription:", res.status);
+          console.warn("[PUSH] backend registration failed with status:", res.status);
           setDiagState(prev => ({ ...prev, backendRegistered: false }));
         }
       }
+    } catch (err: any) {
+      console.error("[PUSH] subscription error:", err?.name, err?.message, err);
+      setDiagState(prev => ({
+        ...prev,
+        subActive: false,
+        subError: `${err?.name || "Error"}: ${err?.message || "Failed to subscribe"}`,
+      }));
+    } finally {
       refreshDiagnostics();
-    } catch (err) {
-      console.error("[PUSH] Error subscribing to Web Push:", err);
     }
   }, [lectureId, facultyId, refreshDiagnostics]);
 
-  // Register service worker on mount and sync push subscription
+  // Register service worker on mount and automatically subscribe/sync if permission is granted
   useEffect(() => {
     if (typeof window !== "undefined") {
       originalTitleRef.current = document.title || "Lectra - Faculty Room";
       if ("Notification" in window) {
         console.log("[NOTIFICATION] supported:", true);
-        console.log("[NOTIFICATION] initial permission:", Notification.permission);
+        console.log("[NOTIFICATION] permission:", Notification.permission);
         setNotificationPermission(Notification.permission);
-      } else {
-        console.log("[NOTIFICATION] supported:", false);
       }
 
       if ("serviceWorker" in navigator) {
@@ -324,9 +360,9 @@ function FacultyDashboardContent() {
             console.warn("[SERVICE_WORKER] registration failed:", err);
           });
 
-        // Listen for messages from sw.js
         navigator.serviceWorker.addEventListener("message", (event) => {
           if (event.data?.type === "PUSH_RECEIVED") {
+            console.log("[PUSH] push notification delivered to service worker at:", event.data.timestamp);
             setDiagState(prev => ({
               ...prev,
               lastPushEventReceived: new Date().toLocaleTimeString(),
@@ -862,9 +898,9 @@ function FacultyDashboardContent() {
           <div className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center justify-between gap-3">
             <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3 font-mono">
               <div>
-                <span className="text-gray-500 block text-[10px] uppercase font-sans">Notification API</span>
-                <span className={typeof window !== "undefined" && "Notification" in window ? "text-emerald-600 dark:text-emerald-400 font-semibold" : "text-red-500 font-semibold"}>
-                  {typeof window !== "undefined" && "Notification" in window ? "supported" : "unsupported"}
+                <span className="text-gray-500 block text-[10px] uppercase font-sans">VAPID Key</span>
+                <span className={diagState.vapidPresent ? "text-emerald-600 dark:text-emerald-400 font-semibold" : "text-red-500 font-semibold"}>
+                  {diagState.vapidPresent ? "present" : "missing"}
                 </span>
               </div>
               <div>
@@ -875,8 +911,8 @@ function FacultyDashboardContent() {
               </div>
               <div>
                 <span className="text-gray-500 block text-[10px] uppercase font-sans">Service Worker</span>
-                <span className={diagState.swActive ? "text-emerald-600 dark:text-emerald-400 font-semibold" : "text-amber-500 font-semibold"}>
-                  {diagState.swActive ? "active" : "missing"}
+                <span className={diagState.swReady ? "text-emerald-600 dark:text-emerald-400 font-semibold" : "text-amber-500 font-semibold"}>
+                  {diagState.swReady ? "active" : "missing"}
                 </span>
               </div>
               <div>
@@ -887,8 +923,8 @@ function FacultyDashboardContent() {
               </div>
               <div>
                 <span className="text-gray-500 block text-[10px] uppercase font-sans">Push Subscription</span>
-                <span className={diagState.subActive ? "text-emerald-600 dark:text-emerald-400 font-semibold" : "text-amber-500 font-semibold"}>
-                  {diagState.subActive ? diagState.endpointHost : "missing"}
+                <span className={diagState.subActive ? "text-emerald-600 dark:text-emerald-400 font-semibold" : diagState.subError ? "text-red-500 font-semibold" : "text-amber-500 font-semibold"}>
+                  {diagState.subActive ? diagState.endpointHost : diagState.subError ? diagState.subError.slice(0, 18) + "…" : "missing"}
                 </span>
               </div>
               <div>
@@ -913,6 +949,13 @@ function FacultyDashboardContent() {
             <div className="flex items-center space-x-2 shrink-0">
               <button
                 type="button"
+                onClick={subscribeToWebPush}
+                className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-sans font-medium transition"
+              >
+                Re-Subscribe
+              </button>
+              <button
+                type="button"
                 onClick={refreshDiagnostics}
                 className="px-2.5 py-1 bg-white dark:bg-[#1a1a1a] hover:bg-gray-100 dark:hover:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-xs font-sans font-medium"
               >
@@ -927,6 +970,11 @@ function FacultyDashboardContent() {
               </button>
             </div>
           </div>
+          {diagState.subError && (
+            <div className="max-w-7xl mx-auto mt-2 p-2 bg-red-100/80 dark:bg-red-950/50 border border-red-200 dark:border-red-800/60 rounded text-red-700 dark:text-red-300 font-mono text-[11px]">
+              <strong>Subscription Error:</strong> {diagState.subError}
+            </div>
+          )}
         </div>
       )}
 
