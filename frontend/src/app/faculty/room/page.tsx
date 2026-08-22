@@ -650,6 +650,22 @@ function FacultyDashboardContent() {
             >
               Test OS Notification
             </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                const pairUrl = `lectra://connect?lecture=${lectureId.toUpperCase()}&apiUrl=${encodeURIComponent(process.env.NEXT_PUBLIC_API_URL || 'https://lectra-xk3q.onrender.com')}`;
+                window.location.href = pairUrl;
+                navigator.clipboard.writeText(lectureId.toUpperCase()).then(() => {
+                  alert(`Class Code ${lectureId.toUpperCase()} copied! If the desktop companion is installed, it will connect automatically. Otherwise, paste ${lectureId.toUpperCase()} into the LECTRA Companion app.`);
+                }).catch(() => {
+                  alert(`Class Code: ${lectureId.toUpperCase()}`);
+                });
+              }}
+              className="px-2.5 py-1 text-xs font-medium text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 rounded-lg transition border border-blue-200 dark:border-blue-800"
+            >
+              Connect Desktop Alerts
+            </button>
           </div>
         </div>
 
