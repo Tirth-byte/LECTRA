@@ -1,16 +1,15 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, memo } from "react";
 import { useSearchParams } from "next/navigation";
 import { 
   LiveKitRoom, 
   RoomAudioRenderer,
   useLocalParticipant,
-  VideoTrack,
   useConnectionState
 } from "@livekit/components-react";
-import { Track, LocalVideoTrack, createLocalScreenTracks, ConnectionState } from "livekit-client";
-import { Users, MonitorUp, StopCircle, EyeOff, UserCheck, AlertCircle, Bell, BellOff, ArrowRight } from "lucide-react";
+import { LocalVideoTrack, createLocalScreenTracks, ConnectionState } from "livekit-client";
+import { Users, MonitorUp, StopCircle, EyeOff, UserCheck, AlertCircle, Bell, BellOff, ArrowRight, Loader2 } from "lucide-react";
 
 type StudentEvent = {
   type: string;
@@ -32,18 +31,101 @@ type StudentState = {
 
 import { Suspense } from "react";
 
-const StudentTimer = ({ awayStartedAt }: { awayStartedAt: number }) => {
+const StudentTimer = memo(function StudentTimer({ awayStartedAt }: { awayStartedAt: number }) {
   const [seconds, setSeconds] = useState(Math.floor((Date.now() - awayStartedAt) / 1000));
   useEffect(() => {
     const interval = setInterval(() => setSeconds(Math.floor((Date.now() - awayStartedAt) / 1000)), 1000);
     return () => clearInterval(interval);
   }, [awayStartedAt]);
   return <span>Away · {seconds}s</span>;
-};
+});
+
+// Memoized Apple-like Toast Stack
+const ToastStack = memo(function ToastStack({
+  toasts,
+}: {
+  toasts: Array<StudentEvent & { id: string; isExiting?: boolean }>;
+}) {
+  if (toasts.length === 0) return null;
+
+  return (
+    <div className="fixed top-20 right-6 z-50 flex flex-col space-y-2.5 pointer-events-none max-w-xs sm:max-w-sm w-full">
+      {toasts.map(toast => (
+        <div
+          key={toast.id}
+          className={`pointer-events-auto px-4 py-3 rounded-[18px] backdrop-blur-xl border transition-all shadow-[0_8px_30px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.35)] ${
+            toast.isExiting ? "animate-toast-exit" : "animate-toast-enter"
+          } ${
+            toast.type === "AWAY"
+              ? "bg-amber-50/90 dark:bg-amber-950/80 border-amber-200/70 dark:border-amber-800/50 text-amber-950 dark:text-amber-100"
+              : toast.type === "VIEWING"
+              ? "bg-emerald-50/90 dark:bg-emerald-950/80 border-emerald-200/70 dark:border-emerald-800/50 text-emerald-950 dark:text-emerald-100"
+              : toast.type === "JOIN"
+              ? "bg-blue-50/90 dark:bg-blue-950/80 border-blue-200/70 dark:border-blue-800/50 text-blue-950 dark:text-blue-100"
+              : "bg-red-50/90 dark:bg-red-950/80 border-red-200/70 dark:border-red-800/50 text-red-950 dark:text-red-100"
+          }`}
+        >
+          <div className="flex items-start space-x-3">
+            <div className="mt-0.5 shrink-0">
+              {toast.type === "AWAY" ? (
+                <div className="w-6 h-6 rounded-full bg-amber-500/20 dark:bg-amber-500/30 flex items-center justify-center">
+                  <EyeOff className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                </div>
+              ) : toast.type === "VIEWING" ? (
+                <div className="w-6 h-6 rounded-full bg-emerald-500/20 dark:bg-emerald-500/30 flex items-center justify-center">
+                  <UserCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                </div>
+              ) : toast.type === "JOIN" ? (
+                <div className="w-6 h-6 rounded-full bg-blue-500/20 dark:bg-blue-500/30 flex items-center justify-center">
+                  <Users className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                </div>
+              ) : (
+                <div className="w-6 h-6 rounded-full bg-red-500/20 dark:bg-red-500/30 flex items-center justify-center">
+                  <AlertCircle className="w-3.5 h-3.5 text-red-600 dark:text-red-400" />
+                </div>
+              )}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-baseline justify-between">
+                <p className="font-semibold text-xs tracking-tight truncate pr-2">
+                  {toast.type === "AWAY" ? (
+                    `${toast.student_name} switched away`
+                  ) : toast.type === "VIEWING" ? (
+                    `${toast.student_name} returned`
+                  ) : toast.type === "JOIN" ? (
+                    `${toast.student_name} joined`
+                  ) : (
+                    `${toast.student_name} disconnected`
+                  )}
+                </p>
+                <span className="text-[10px] opacity-60 font-medium shrink-0">
+                  Just now
+                </span>
+              </div>
+              <p className="text-[11px] opacity-80 mt-0.5 leading-snug truncate">
+                {toast.type === "AWAY"
+                  ? toast.reason === "PAGE_HIDDEN"
+                    ? "Switched browser tab or minimized"
+                    : toast.reason === "WINDOW_BLURRED"
+                    ? "Changed active window"
+                    : toast.reason === "FULLSCREEN_EXITED"
+                    ? "Exited Focus Mode"
+                    : "Left the lecture view"
+                  : toast.durationStr
+                  ? `Returned after ${toast.durationStr.replace(/[()]/g, "")}`
+                  : "Active in lecture"}
+              </p>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+});
 
 function FacultyDashboardContent() {
   const searchParams = useSearchParams();
-  const lectureId = searchParams.get("lectureId") as string;
+  const lectureId = (searchParams.get("lectureId") as string) || "";
   const facultyId = searchParams.get("facultyId");
 
   const [token, setToken] = useState("");
@@ -55,10 +137,12 @@ function FacultyDashboardContent() {
   const [summary, setSummary] = useState<any>(null);
   const [notificationPermission, setNotificationPermission] = useState<string>("default");
   const [showPermissionHelp, setShowPermissionHelp] = useState(false);
+  const [showEndConfirm, setShowEndConfirm] = useState(false);
+  const [isEnding, setIsEnding] = useState(false);
 
-  // Track recent system notifications to deduplicate within a short window
+  // Stable references
   const lastSystemNotificationRef = useRef<Record<string, { type: string; reason?: string; time: number }>>({});
-  const originalTitleRef = useRef<string>("");
+  const originalTitleRef = useRef<string>("Lectra - Faculty Room");
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -80,70 +164,65 @@ function FacultyDashboardContent() {
     }
   };
 
-  // Helper: Dispatch Native System Notification (Cross-App when tab is not focused/visible)
+  // Dispatch Native System Notification (Cross-App when tab is not focused/visible)
   const triggerSystemNotification = useCallback((event: StudentEvent) => {
     if (typeof window === "undefined") return;
 
-    const isTabActive = document.visibilityState === "visible" && document.hasFocus();
-    
-    // Only dispatch OS-level system notification if the faculty is NOT actively focused on the LECTRA tab
-    if (!isTabActive) {
-      // 1. Optional document title fallback
-      const reasonLabel = event.type === "AWAY"
-        ? event.reason === "PAGE_HIDDEN" ? "switched tabs" : event.reason === "FULLSCREEN_EXITED" ? "exited Focus Mode" : "left window"
-        : event.type === "VIEWING" ? "returned" : event.type.toLowerCase();
-      document.title = `(${event.student_name} ${reasonLabel}) ${originalTitleRef.current}`;
+    try {
+      const isTabActive = document.visibilityState === "visible" && document.hasFocus();
+      
+      if (!isTabActive) {
+        const reasonLabel = event.type === "AWAY"
+          ? event.reason === "PAGE_HIDDEN" ? "switched tabs" : event.reason === "FULLSCREEN_EXITED" ? "exited Focus Mode" : "left window"
+          : event.type === "VIEWING" ? "returned" : event.type.toLowerCase();
+        document.title = `(${event.student_name} ${reasonLabel}) ${originalTitleRef.current}`;
 
-      // 2. Check deduplication for system notification (avoid repeat alerts for same student within 3s)
-      const now = Date.now();
-      const last = lastSystemNotificationRef.current[event.student_id];
-      if (last && last.type === event.type && last.reason === event.reason && (now - last.time < 3000)) {
-        return;
-      }
-      lastSystemNotificationRef.current[event.student_id] = {
-        type: event.type,
-        reason: event.reason,
-        time: now
-      };
-
-      // 3. Dispatch OS Notification if permission granted
-      if ("Notification" in window && Notification.permission === "granted") {
-        let title = "LECTRA Focus Alert";
-        let body = `${event.student_name} changed activity`;
-
-        if (event.type === "AWAY") {
-          if (event.reason === "PAGE_HIDDEN") {
-            title = `⚠ ${event.student_name} switched tabs`;
-            body = `${event.student_name} left the lecture to view another tab or app.`;
-          } else if (event.reason === "FULLSCREEN_EXITED") {
-            title = `⚠ ${event.student_name} exited Focus Mode`;
-            body = `${event.student_name} minimized or left fullscreen view.`;
-          } else if (event.reason === "WINDOW_BLURRED") {
-            title = `⚠ ${event.student_name} left lecture window`;
-            body = `${event.student_name} switched focus to another desktop window.`;
-          } else {
-            title = `⚠ ${event.student_name} switched away`;
-            body = `Student is no longer actively watching the stream.`;
-          }
-        } else if (event.type === "DISCONNECTED") {
-          title = `✕ ${event.student_name} disconnected`;
-          body = `Student lost connection to the lecture broadcast.`;
-        } else if (event.type === "JOIN") {
-          title = `● ${event.student_name} joined`;
-          body = `Student joined lecture ${lectureId.toUpperCase()}`;
-        } else if (event.type === "VIEWING" && event.durationStr) {
-          title = `✓ ${event.student_name} returned`;
-          body = `Student resumed watching the broadcast.`;
-        } else {
-          // Avoid spamming OS notifications for routine return/heartbeats
+        const now = Date.now();
+        const last = lastSystemNotificationRef.current[event.student_id];
+        if (last && last.type === event.type && last.reason === event.reason && (now - last.time < 3000)) {
           return;
         }
+        lastSystemNotificationRef.current[event.student_id] = {
+          type: event.type,
+          reason: event.reason,
+          time: now
+        };
 
-        try {
+        if ("Notification" in window && Notification.permission === "granted") {
+          let title = "LECTRA Focus Alert";
+          let body = `${event.student_name} changed activity`;
+
+          if (event.type === "AWAY") {
+            if (event.reason === "PAGE_HIDDEN") {
+              title = `⚠ ${event.student_name} switched tabs`;
+              body = `${event.student_name} left the lecture to view another tab or app.`;
+            } else if (event.reason === "FULLSCREEN_EXITED") {
+              title = `⚠ ${event.student_name} exited Focus Mode`;
+              body = `${event.student_name} minimized or left fullscreen view.`;
+            } else if (event.reason === "WINDOW_BLURRED") {
+              title = `⚠ ${event.student_name} left lecture window`;
+              body = `${event.student_name} switched focus to another desktop window.`;
+            } else {
+              title = `⚠ ${event.student_name} switched away`;
+              body = `Student is no longer actively watching the stream.`;
+            }
+          } else if (event.type === "DISCONNECTED") {
+            title = `✕ ${event.student_name} disconnected`;
+            body = `Student lost connection to the lecture broadcast.`;
+          } else if (event.type === "JOIN") {
+            title = `● ${event.student_name} joined`;
+            body = `Student joined lecture ${lectureId.toUpperCase()}`;
+          } else if (event.type === "VIEWING" && event.durationStr) {
+            title = `✓ ${event.student_name} returned`;
+            body = `Student resumed watching the broadcast.`;
+          } else {
+            return;
+          }
+
           const notification = new Notification(title, {
             body,
             icon: "/favicon.ico",
-            tag: `lectra-${event.student_id}-${event.type}`, // Group repeat events by student
+            tag: `lectra-${event.student_id}-${event.type}`,
             requireInteraction: false
           });
 
@@ -151,17 +230,15 @@ function FacultyDashboardContent() {
             window.focus();
             notification.close();
           };
-        } catch (err) {
-          console.warn("Could not display native notification", err);
         }
+      } else {
+        document.title = originalTitleRef.current;
       }
-    } else {
-      // Tab is active: restore normal document title
-      document.title = originalTitleRef.current;
+    } catch (err) {
+      console.warn("Could not dispatch notification safely", err);
     }
   }, [lectureId]);
 
-  // Restore title when user focuses window
   useEffect(() => {
     const handleFocus = () => {
       if (typeof document !== "undefined") {
@@ -172,39 +249,33 @@ function FacultyDashboardContent() {
     return () => window.removeEventListener("focus", handleFocus);
   }, []);
 
-  // Helper: Add Apple-style In-App Toast
+  // Add Apple-style In-App Toast
   const triggerInAppToast = useCallback((event: StudentEvent) => {
     const alertId = `${event.student_id}-${Date.now()}-${Math.random()}`;
     const toastItem = { ...event, id: alertId };
     
     setToastAlerts(prev => [toastItem, ...prev].slice(0, 4));
 
-    // Smooth exit timer
+    const duration = event.type === "AWAY" ? 5000 : event.type === "DISCONNECTED" ? 6000 : 3500;
+
     setTimeout(() => {
       setToastAlerts(prev =>
         prev.map(t => (t.id === alertId ? { ...t, isExiting: true } : t))
       );
       setTimeout(() => {
         setToastAlerts(prev => prev.filter(t => t.id !== alertId));
-      }, 300);
-    }, 4500);
+      }, 250);
+    }, duration);
   }, []);
 
-  // Process incoming event for both layers
   const handleIncomingEvent = useCallback((event: StudentEvent) => {
-    console.log(`[FACULTY] processing event: ${event.type} for ${event.student_name}`);
-
-    // Layer 1: In-app Apple-like toast
+    console.log(`[FACULTY] event: ${event.type} for ${event.student_name}`);
     triggerInAppToast(event);
-
-    // Layer 2: System-wide native notification (when in VS Code / PowerPoint / background)
     triggerSystemNotification(event);
-
-    // Persistent recent activity
     setNotifications(prev => [event, ...prev].slice(0, 15));
   }, [triggerInAppToast, triggerSystemNotification]);
 
-  // Fetch initial and updated participants
+  // Fetch initial and updated participants (isolated function using functional updates)
   const fetchParticipants = useCallback(async () => {
     if (!lectureId) return;
     try {
@@ -218,7 +289,6 @@ function FacultyDashboardContent() {
             const prevState = prev[p.id];
             let awayStartedAt = prevState?.awayStartedAt;
             
-            // Check state transition from poll
             if (p.status === "AWAY" && prevState?.status && prevState.status !== "AWAY") {
               awayStartedAt = Date.now();
               handleIncomingEvent({
@@ -259,12 +329,12 @@ function FacultyDashboardContent() {
     }
   }, [lectureId, handleIncomingEvent]);
 
+  // Fetch faculty token ONCE on load (isolated from participants & toasts)
   useEffect(() => {
     if (!lectureId || !facultyId) return;
     const normalizedLectureId = lectureId.toUpperCase();
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
     
-    // Fetch LiveKit token
     fetch(`${apiUrl}/api/lectures/${normalizedLectureId}/token?faculty_id=${facultyId}`)
       .then(res => res.json())
       .then(data => {
@@ -272,14 +342,17 @@ function FacultyDashboardContent() {
         else setError("Failed to get broadcast token.");
       })
       .catch(err => setError(err.message));
+  }, [lectureId, facultyId]);
 
-    // Initial participant fetch
+  // Realtime SSE & Polling Lifecycle
+  useEffect(() => {
+    if (!lectureId || sessionEnded) return;
+    const normalizedLectureId = lectureId.toUpperCase();
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
     fetchParticipants();
+    const pollInterval = setInterval(fetchParticipants, 3000);
 
-    // Polling backup every 2.5 seconds to guarantee sync
-    const pollInterval = setInterval(fetchParticipants, 2500);
-
-    // Connect to SSE for instant events
     const eventSource = new EventSource(`${apiUrl}/api/lectures/${normalizedLectureId}/events`);
     
     eventSource.onopen = () => {
@@ -321,10 +394,9 @@ function FacultyDashboardContent() {
           };
         });
 
-        // Trigger two-layer notifications
         handleIncomingEvent(event);
         
-        if (event.type === "END") {
+        if (event.type === "LECTURE_ENDED" || event.type === "END") {
           setSessionEnded(true);
         }
       } catch (err) {
@@ -333,39 +405,50 @@ function FacultyDashboardContent() {
     };
 
     eventSource.onerror = (err) => {
-      console.warn("[SSE] EventSource error, auto-reconnecting", err);
+      console.warn("[SSE] EventSource error, will auto-reconnect", err);
     };
 
     return () => {
       eventSource.close();
       clearInterval(pollInterval);
     };
-  }, [lectureId, facultyId, fetchParticipants, handleIncomingEvent]);
+  }, [lectureId, sessionEnded, fetchParticipants, handleIncomingEvent]);
 
-  const endLecture = async () => {
-    if (!confirm("Are you sure you want to end this lecture?")) return;
+  // Execute End Lecture
+  const handleConfirmEnd = async () => {
+    if (isEnding) return;
+    setIsEnding(true);
     
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId.toUpperCase()}/end`, {
-        method: "POST"
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const res = await fetch(`${apiUrl}/api/lectures/${lectureId.toUpperCase()}/end`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }
       });
+      
       if (res.ok) {
         const data = await res.json();
-        setSummary(data.summary);
+        setSummary(data.summary || { total_students: Object.keys(students).length, total_events: notifications.length });
         setSessionEnded(true);
+      } else {
+        alert("Failed to end lecture on server. Please try again.");
       }
     } catch (err) {
-      console.error(err);
+      console.error("[FACULTY] Error ending lecture:", err);
+      alert("Network error ending lecture.");
+    } finally {
+      setIsEnding(false);
+      setShowEndConfirm(false);
     }
   };
 
   if (error) return <div className="p-8 text-red-500">{error}</div>;
-  if (!token) return <div className="p-8 dark:text-white">Loading dashboard...</div>;
+  if (!token && !sessionEnded) return <div className="p-8 dark:text-white">Loading dashboard...</div>;
 
   if (sessionEnded) {
     return (
       <div className="min-h-screen bg-gray-50 dark:bg-[#0a0a0a] flex items-center justify-center p-6">
-        <div className="max-w-md w-full bg-white dark:bg-[#1a1a1a] rounded-2xl shadow-sm border border-gray-200 dark:border-gray-800 p-8 text-center space-y-6">
+        <div className="max-w-md w-full bg-white dark:bg-[#1a1a1a] rounded-2xl shadow-sm border border-gray-200 dark:border-gray-800 p-8 text-center space-y-6 animate-toast-enter">
           <div className="w-16 h-16 bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-full flex items-center justify-center mx-auto">
             <StopCircle className="w-8 h-8" />
           </div>
@@ -378,11 +461,11 @@ function FacultyDashboardContent() {
           {summary && (
             <div className="bg-gray-50 dark:bg-[#222] rounded-xl p-4 flex justify-around">
               <div className="text-center">
-                <p className="text-2xl font-bold text-gray-900 dark:text-white">{summary.total_students}</p>
+                <p className="text-2xl font-bold text-gray-900 dark:text-white">{summary.total_students ?? Object.keys(students).length}</p>
                 <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">Students</p>
               </div>
               <div className="text-center">
-                <p className="text-2xl font-bold text-gray-900 dark:text-white">{summary.total_events}</p>
+                <p className="text-2xl font-bold text-gray-900 dark:text-white">{summary.total_events ?? notifications.length}</p>
                 <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">Presence Events</p>
               </div>
             </div>
@@ -397,78 +480,38 @@ function FacultyDashboardContent() {
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-[#0a0a0a] flex flex-col relative">
-      {/* LAYER 1: Apple-Style Right-Side In-App Floating Toasts */}
-      <div className="fixed top-20 right-6 z-50 flex flex-col space-y-2.5 pointer-events-none max-w-xs sm:max-w-sm w-full">
-        {toastAlerts.map(toast => (
-          <div
-            key={toast.id}
-            className={`pointer-events-auto px-4 py-3.5 rounded-[18px] backdrop-blur-xl border transition-all duration-300 shadow-[0_8px_30px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.35)] ${
-              toast.isExiting ? "animate-toast-exit" : "animate-toast-enter"
-            } ${
-              toast.type === "AWAY"
-                ? "bg-amber-50/85 dark:bg-amber-950/75 border-amber-200/70 dark:border-amber-800/50 text-amber-950 dark:text-amber-100"
-                : toast.type === "VIEWING"
-                ? "bg-emerald-50/85 dark:bg-emerald-950/75 border-emerald-200/70 dark:border-emerald-800/50 text-emerald-950 dark:text-emerald-100"
-                : toast.type === "JOIN"
-                ? "bg-blue-50/85 dark:bg-blue-950/75 border-blue-200/70 dark:border-blue-800/50 text-blue-950 dark:text-blue-100"
-                : "bg-red-50/85 dark:bg-red-950/75 border-red-200/70 dark:border-red-800/50 text-red-950 dark:text-red-100"
-            }`}
-          >
-            <div className="flex items-start space-x-3">
-              <div className="mt-0.5 shrink-0">
-                {toast.type === "AWAY" ? (
-                  <div className="w-6 h-6 rounded-full bg-amber-500/20 dark:bg-amber-500/30 flex items-center justify-center">
-                    <EyeOff className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
-                  </div>
-                ) : toast.type === "VIEWING" ? (
-                  <div className="w-6 h-6 rounded-full bg-emerald-500/20 dark:bg-emerald-500/30 flex items-center justify-center">
-                    <UserCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                  </div>
-                ) : toast.type === "JOIN" ? (
-                  <div className="w-6 h-6 rounded-full bg-blue-500/20 dark:bg-blue-500/30 flex items-center justify-center">
-                    <Users className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-                  </div>
-                ) : (
-                  <div className="w-6 h-6 rounded-full bg-red-500/20 dark:bg-red-500/30 flex items-center justify-center">
-                    <AlertCircle className="w-3.5 h-3.5 text-red-600 dark:text-red-400" />
-                  </div>
-                )}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-baseline justify-between">
-                  <p className="font-semibold text-xs tracking-tight truncate pr-2">
-                    {toast.type === "AWAY" ? (
-                      `${toast.student_name} switched away`
-                    ) : toast.type === "VIEWING" ? (
-                      `${toast.student_name} returned`
-                    ) : toast.type === "JOIN" ? (
-                      `${toast.student_name} joined`
-                    ) : (
-                      `${toast.student_name} disconnected`
-                    )}
-                  </p>
-                  <span className="text-[10px] opacity-60 font-medium shrink-0">
-                    Just now
-                  </span>
-                </div>
-                <p className="text-[11px] opacity-80 mt-0.5 leading-snug truncate">
-                  {toast.type === "AWAY"
-                    ? toast.reason === "PAGE_HIDDEN"
-                      ? "Switched browser tab or minimized"
-                      : toast.reason === "WINDOW_BLURRED"
-                      ? "Changed active window"
-                      : toast.reason === "FULLSCREEN_EXITED"
-                      ? "Exited Focus Mode"
-                      : "Left the lecture view"
-                    : toast.durationStr
-                    ? `Returned after ${toast.durationStr.replace(/[()]/g, "")}`
-                    : "Active in lecture"}
-                </p>
-              </div>
+      {/* Toast Stack */}
+      <ToastStack toasts={toastAlerts} />
+
+      {/* Confirmation Modal for End Lecture */}
+      {showEndConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-toast-enter">
+          <div className="bg-white dark:bg-[#1c1c1e] max-w-sm w-full rounded-2xl p-6 shadow-2xl border border-gray-200 dark:border-gray-800 space-y-4">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">End this lecture?</h3>
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              All students will be disconnected from the live broadcast and session metrics will be saved.
+            </p>
+            <div className="flex space-x-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowEndConfirm(false)}
+                disabled={isEnding}
+                className="flex-1 px-4 py-2.5 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-xl font-medium text-sm transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmEnd}
+                disabled={isEnding}
+                className="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl font-medium text-sm transition flex items-center justify-center space-x-2"
+              >
+                {isEnding ? <Loader2 className="w-4 h-4 animate-spin" /> : <span>End Lecture</span>}
+              </button>
             </div>
           </div>
-        ))}
-      </div>
+        </div>
+      )}
 
       <header className="bg-white dark:bg-[#121212] border-b border-gray-200 dark:border-gray-800 px-6 py-4 flex items-center justify-between sticky top-0 z-10">
         <div className="flex items-center space-x-6">
@@ -532,7 +575,8 @@ function FacultyDashboardContent() {
         </div>
 
         <button
-          onClick={endLecture}
+          type="button"
+          onClick={() => setShowEndConfirm(true)}
           className="px-4 py-2 bg-red-50 text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/30 rounded-lg text-sm font-medium transition-colors"
         >
           End Lecture
@@ -540,17 +584,17 @@ function FacultyDashboardContent() {
       </header>
 
       <main className="flex-1 p-6 max-w-7xl mx-auto w-full grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left Column: Broadcast Control */}
+        {/* Left Column: Broadcast Control with stable LiveKit Room */}
         <div className="lg:col-span-2 flex flex-col space-y-6">
           <LiveKitRoom
             video={false}
             audio={false}
             token={token}
             serverUrl={process.env.NEXT_PUBLIC_LIVEKIT_URL || "ws://localhost:7880"}
-            connect={true}
+            connect={!!token}
             className="flex-1 flex flex-col"
-            onDisconnected={() => console.error("LiveKitRoom disconnected")}
-            onError={(error) => console.error("LiveKitRoom error:", error)}
+            onDisconnected={() => console.log("LiveKitRoom disconnected")}
+            onError={(err) => console.error("LiveKitRoom error:", err)}
           >
             <BroadcastControl lectureId={lectureId.toUpperCase()} />
             <RoomAudioRenderer />
@@ -615,11 +659,11 @@ function FacultyDashboardContent() {
           {notifications.length > 0 && (
             <div className="bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-gray-800 rounded-2xl p-6 shadow-sm">
               <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wider">Recent Activity</h3>
-              <div className="space-y-3">
+              <div className="space-y-3 max-h-60 overflow-y-auto pr-1">
                 {notifications.map((n, idx) => (
                   <div key={idx} className="flex items-start space-x-3 text-sm">
                     <div className={`mt-0.5 w-2 h-2 rounded-full ${n.type === 'AWAY' ? 'bg-amber-500' : ['VIEWING', 'RECONNECTED'].includes(n.type) ? 'bg-emerald-500' : n.type === 'JOIN' ? 'bg-blue-500' : 'bg-gray-400'}`} />
-                    <p className="text-gray-600 dark:text-gray-300">
+                    <p className="text-gray-600 dark:text-gray-300 text-xs">
                       <span className="font-semibold text-gray-900 dark:text-white">{n.student_name}</span>{" "}
                       {n.type === "AWAY" ? "left lecture view" : 
                        n.type === "VIEWING" ? `returned${n.durationStr || ''}` : 
@@ -651,9 +695,31 @@ function BroadcastControl({ lectureId }: { lectureId: string }) {
   const { localParticipant } = useLocalParticipant();
   const connectionState = useConnectionState();
   const [screenTrack, setScreenTrack] = useState<LocalVideoTrack | null>(null);
+  const [shareState, setShareState] = useState<"IDLE" | "STARTING" | "SHARING" | "STOPPING">("IDLE");
+  const [shareError, setShareError] = useState<string | null>(null);
+
+  const videoElementRef = useRef<HTMLVideoElement | null>(null);
+
+  // Attach local screen track to video preview
+  useEffect(() => {
+    if (screenTrack && videoElementRef.current) {
+      screenTrack.attach(videoElementRef.current);
+    }
+    return () => {
+      if (screenTrack) {
+        screenTrack.detach();
+      }
+    };
+  }, [screenTrack]);
 
   const startScreenShare = async () => {
-    if (connectionState !== ConnectionState.Connected) return;
+    if (shareState !== "IDLE" || connectionState !== ConnectionState.Connected || !localParticipant) {
+      return;
+    }
+    
+    setShareState("STARTING");
+    setShareError(null);
+
     try {
       const tracks = await createLocalScreenTracks({
         audio: false,
@@ -661,68 +727,72 @@ function BroadcastControl({ lectureId }: { lectureId: string }) {
       });
       
       const track = tracks.find(t => t.kind === 'video') as LocalVideoTrack;
-      if (track && localParticipant) {
-        await localParticipant.publishTrack(track);
-        setScreenTrack(track);
-
-        // Update status to LIVE
-        fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId}/status`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "LIVE" })
-        }).catch(console.error);
-
-        // Handle native browser stop button
-        track.on('ended', () => {
-          stopScreenShare();
-        });
+      if (!track) {
+        throw new Error("No video track captured");
       }
-    } catch (e) {
-      console.error("Could not start screen share", e);
+
+      await localParticipant.publishTrack(track);
+      setScreenTrack(track);
+      setShareState("SHARING");
+
+      // Notify backend of LIVE status
+      fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId}/status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "LIVE" })
+      }).catch(console.error);
+
+      // Handle native browser stop button (e.g. Chrome's "Stop sharing" bar)
+      track.on('ended', () => {
+        stopScreenShare();
+      });
+    } catch (e: any) {
+      console.error("[BROADCAST] Could not start screen share:", e);
+      setShareState("IDLE");
+      if (e.name === "NotAllowedError") {
+        setShareError("Screen sharing was cancelled or blocked by browser permission.");
+      } else {
+        setShareError(e.message || "Unable to start screen sharing. Please check permissions.");
+      }
     }
   };
 
-  const stopScreenShare = () => {
-    if (screenTrack && localParticipant) {
-      localParticipant.unpublishTrack(screenTrack);
+  const stopScreenShare = async () => {
+    if (shareState === "STOPPING" || !screenTrack) return;
+    setShareState("STOPPING");
+
+    try {
+      if (localParticipant) {
+        localParticipant.unpublishTrack(screenTrack);
+      }
       screenTrack.stop();
       setScreenTrack(null);
       
-      // Update status to WAITING
       fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId}/status`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: "WAITING" })
       }).catch(console.error);
+    } catch (err) {
+      console.error("[BROADCAST] Error stopping screen share:", err);
+    } finally {
+      setShareState("IDLE");
     }
   };
 
-  // Helper component to render a local video track robustly
-  const renderLocalVideo = (track: any) => {
-    return (
-      <video
-        ref={(el) => {
-          if (el) {
-            track.attach(el);
-          } else {
-            track.detach();
-          }
-        }}
-        className="w-full h-full object-contain"
-        autoPlay
-        muted
-        playsInline
-      />
-    );
-  };
-
   return (
-    <div className="flex-1 bg-gray-900 rounded-2xl overflow-hidden relative flex items-center justify-center border border-gray-800 shadow-xl">
+    <div className="flex-1 bg-gray-900 rounded-2xl overflow-hidden relative flex items-center justify-center border border-gray-800 shadow-xl min-h-[420px]">
       {screenTrack ? (
         <>
-          {renderLocalVideo(screenTrack)}
-          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center space-x-4 bg-gray-900/80 backdrop-blur-md px-6 py-3 rounded-2xl border border-gray-700">
-            <div className="flex items-center space-x-2 text-emerald-400 font-medium">
+          <video
+            ref={videoElementRef}
+            className="w-full h-full object-contain"
+            autoPlay
+            muted
+            playsInline
+          />
+          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center space-x-4 bg-gray-900/85 backdrop-blur-md px-6 py-3 rounded-2xl border border-gray-700 shadow-2xl">
+            <div className="flex items-center space-x-2 text-emerald-400 font-medium text-sm">
               <span className="relative flex h-3 w-3">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
@@ -731,36 +801,51 @@ function BroadcastControl({ lectureId }: { lectureId: string }) {
             </div>
             <div className="w-px h-6 bg-gray-700" />
             <button
+              type="button"
               onClick={stopScreenShare}
-              className="flex items-center space-x-2 text-red-400 hover:text-red-300 font-medium transition-colors"
+              disabled={shareState === "STOPPING"}
+              className="flex items-center space-x-2 text-red-400 hover:text-red-300 font-medium text-sm transition-colors cursor-pointer"
             >
-              <StopCircle className="w-5 h-5" />
-              <span>Stop Share</span>
+              <StopCircle className="w-4 h-4" />
+              <span>{shareState === "STOPPING" ? "Stopping..." : "Stop Share"}</span>
             </button>
           </div>
         </>
       ) : (
-        <div className="text-center space-y-6 max-w-sm">
+        <div className="text-center space-y-6 max-w-sm p-6">
           <div className="w-20 h-20 bg-gray-800 rounded-full flex items-center justify-center mx-auto">
             <MonitorUp className="w-10 h-10 text-gray-400" />
           </div>
           <div>
             <h3 className="text-xl font-medium text-white mb-2">Ready to Broadcast</h3>
             <div className="flex items-center justify-center space-x-2">
-              <div className={`w-3 h-3 rounded-full ${connectionState === ConnectionState.Connected ? "bg-green-500" : connectionState === ConnectionState.Connecting ? "bg-yellow-500 animate-pulse" : "bg-red-500"}`}></div>
+              <div className={`w-2.5 h-2.5 rounded-full ${connectionState === ConnectionState.Connected ? "bg-green-500" : connectionState === ConnectionState.Connecting ? "bg-yellow-500 animate-pulse" : "bg-red-500"}`}></div>
               <span className="text-sm font-medium text-gray-400">
-                {connectionState === ConnectionState.Connected ? "Ready to broadcast" : 
-                 connectionState === ConnectionState.Connecting ? "Connecting to LiveKit server..." : 
-                 `Connection Status: ${connectionState}`}
+                {connectionState === ConnectionState.Connected ? "LiveKit server connected" : 
+                 connectionState === ConnectionState.Connecting ? "Connecting to LiveKit..." : 
+                 `Connection: ${connectionState}`}
               </span>
             </div>
+            {shareError && (
+              <p className="mt-3 text-xs text-amber-400 bg-amber-950/40 border border-amber-800/40 p-2.5 rounded-xl">
+                {shareError}
+              </p>
+            )}
           </div>
           <button
+            type="button"
             onClick={startScreenShare}
-            disabled={connectionState !== ConnectionState.Connected}
-            className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-400 text-white py-3 px-6 rounded-xl font-medium transition-colors shadow-lg shadow-blue-900/20 flex justify-center items-center"
+            disabled={connectionState !== ConnectionState.Connected || shareState === "STARTING"}
+            className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-gray-800 disabled:text-gray-500 text-white py-3.5 px-6 rounded-xl font-medium transition-colors shadow-lg shadow-blue-900/20 flex justify-center items-center space-x-2 cursor-pointer disabled:cursor-not-allowed"
           >
-            {connectionState === ConnectionState.Connected ? "Select Screen to Share" : `Wait: ${connectionState}`}
+            {shareState === "STARTING" ? (
+              <>
+                <Loader2 className="w-5 h-5 animate-spin" />
+                <span>Opening Screen Picker...</span>
+              </>
+            ) : (
+              <span>Select Screen to Share</span>
+            )}
           </button>
         </div>
       )}
