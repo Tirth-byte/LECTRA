@@ -215,37 +215,38 @@ function StudentViewerContent() {
     );
   }
 
-  if (!isFullscreen) {
-    return (
-      <div className="min-h-screen bg-black flex flex-col items-center justify-center text-white p-6 text-center space-y-6">
-        <ShieldAlert className="w-16 h-16 text-amber-500" />
-        <h1 className="text-2xl font-bold">Focus Mode is Enabled</h1>
-        <p className="text-gray-400 max-w-md">
-          This lecture requires Focus Mode. You must enter fullscreen to join the live broadcast. Lectra will notify the instructor if you leave the lecture view.
-        </p>
-        <button 
-          onClick={toggleFullscreen}
-          className="px-6 py-3 bg-amber-600 hover:bg-amber-500 text-white font-medium rounded-xl transition-colors flex items-center space-x-2"
-        >
-          <Maximize className="w-5 h-5" />
-          <span>Enter Fullscreen to Join</span>
-        </button>
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen bg-black flex flex-col text-white">
+    <div className="min-h-screen bg-black flex flex-col text-white relative">
+      {/* Overlay when not in fullscreen (Focus Mode) without unmounting LiveKitRoom */}
+      {!isFullscreen && (
+        <div className="absolute inset-0 z-50 bg-black/95 backdrop-blur-md flex flex-col items-center justify-center text-white p-6 text-center space-y-6 animate-toast-enter">
+          <ShieldAlert className="w-16 h-16 text-amber-500" />
+          <h1 className="text-2xl font-bold">Focus Mode is Enabled</h1>
+          <p className="text-gray-400 max-w-md">
+            This lecture requires Focus Mode. You must enter fullscreen to view the live broadcast. Lectra will notify the instructor if you leave the lecture view.
+          </p>
+          <button 
+            type="button"
+            onClick={toggleFullscreen}
+            className="px-6 py-3.5 bg-amber-600 hover:bg-amber-500 text-white font-medium rounded-xl transition-colors flex items-center space-x-2 shadow-lg cursor-pointer"
+          >
+            <Maximize className="w-5 h-5" />
+            <span>Enter Fullscreen to View</span>
+          </button>
+        </div>
+      )}
+
       <main className="flex-1 relative">
         <LiveKitRoom
           video={false}
           audio={false}
           token={token}
           serverUrl={process.env.NEXT_PUBLIC_LIVEKIT_URL || "ws://localhost:7880"}
-          connect={true}
+          connect={!isEnded}
           className="w-full h-full flex flex-col items-center justify-center bg-black"
-          onDisconnected={() => console.error("LiveKitRoom disconnected")}
-          onError={(error) => console.error("LiveKitRoom error:", error)}
+          onConnected={() => console.log("[STUDENT_LIVEKIT] Room connected")}
+          onDisconnected={() => console.log("[STUDENT_LIVEKIT] Room disconnected")}
+          onError={(error) => console.error("[STUDENT_LIVEKIT] Room error:", error)}
         >
           <ScreenViewer status={sessionStatus} />
           <RoomAudioRenderer />
@@ -265,7 +266,7 @@ export default function StudentViewer() {
 
 function ScreenViewer({ status }: { status: string }) {
   const tracks = useTracks([Track.Source.ScreenShare, Track.Source.ScreenShareAudio]);
-  const videoTrack = tracks.find((t) => t.publication.kind === "video");
+  const videoTrack = tracks.find((t) => t.source === Track.Source.ScreenShare && t.publication.kind === "video");
   const connectionState = useConnectionState();
 
   if (connectionState === ConnectionState.Disconnected) {
@@ -280,33 +281,24 @@ function ScreenViewer({ status }: { status: string }) {
   if (connectionState === ConnectionState.Connecting || connectionState === ConnectionState.Reconnecting) {
     return (
       <div className="flex flex-col items-center justify-center space-y-4 text-gray-500 h-full w-full">
-        <MonitorPlay className="w-16 h-16 opacity-50" />
-        <p className="text-lg text-amber-500">LiveKit status: {connectionState}...</p>
+        <MonitorPlay className="w-16 h-16 opacity-50 animate-pulse" />
+        <p className="text-lg text-amber-500">Connecting to stream...</p>
       </div>
     );
   }
 
-  if (status === "WAITING") {
+  if (status === "WAITING" || !videoTrack) {
     return (
       <div className="flex flex-col items-center justify-center space-y-4 text-gray-500">
-        <MonitorPlay className="w-16 h-16 opacity-50" />
-        <p className="text-lg animate-pulse">Waiting for lecturer to start broadcasting...</p>
-      </div>
-    );
-  }
-
-  if (!videoTrack) {
-    return (
-      <div className="flex flex-col items-center justify-center space-y-4 text-gray-500">
-        <MonitorPlay className="w-16 h-16 opacity-50" />
-        <p className="text-lg animate-pulse">Waiting for stream track...</p>
+        <MonitorPlay className="w-16 h-16 opacity-50 animate-pulse" />
+        <p className="text-lg text-gray-400 font-medium">Waiting for instructor to broadcast screen...</p>
       </div>
     );
   }
 
   return (
     <div className="w-full h-full p-2 lg:p-4">
-      <div className="w-full h-full bg-[#111] rounded-2xl overflow-hidden border border-gray-800 relative shadow-2xl">
+      <div className="w-full h-full bg-[#111] rounded-2xl overflow-hidden border border-gray-800 relative shadow-2xl flex items-center justify-center">
         <VideoTrack trackRef={videoTrack} className="w-full h-full object-contain" />
       </div>
     </div>
