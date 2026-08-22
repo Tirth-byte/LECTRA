@@ -446,35 +446,50 @@ async def update_presence(
 
 
 @app.post("/api/lectures/{lecture_id}/end")
-async def end_lecture(lecture_id: str, db: Session = Depends(get_db)):
+async def end_lecture(lecture_id: str):
     lecture_id = lecture_id.upper()
-    def do_end():
-        db_lecture = db.query(models.Lecture).filter(models.Lecture.id == lecture_id).first()
-        if not db_lecture:
-            return None
-        db_lecture.status = "ENDED"
-        db_lecture.ended_at = datetime.datetime.utcnow()
-        db.commit()
-        activities = (
-            db.query(models.SessionActivity)
-            .filter(models.SessionActivity.lecture_id == lecture_id)
-            .all()
-        )
-        unique_students = len(set([a.student_id for a in activities]))
-        return db_lecture.ended_at, unique_students, len(activities)
 
-    result = await run_in_threadpool(do_end)
+    def do_end():
+        db = SessionLocal()
+        try:
+            db_lecture = db.query(models.Lecture).filter(models.Lecture.id == lecture_id).first()
+            if not db_lecture:
+                return None
+            db_lecture.status = "ENDED"
+            db_lecture.ended_at = datetime.datetime.utcnow()
+            db.commit()
+            activities = (
+                db.query(models.SessionActivity)
+                .filter(models.SessionActivity.lecture_id == lecture_id)
+                .all()
+            )
+            unique_students = len(set([a.student_id for a in activities]))
+            return db_lecture.ended_at.isoformat(), unique_students, len(activities)
+        finally:
+            db.close()
+
+    try:
+        result = await run_in_threadpool(do_end)
+    except Exception as exc:
+        logger.error("[END_LECTURE] DB Error ending lecture %s: %s", lecture_id, exc)
+        raise HTTPException(status_code=500, detail="Database error ending lecture")
+
     if not result:
         raise HTTPException(status_code=404, detail="Lecture not found")
+
+    ended_at_str, unique_students, total_events = result
 
     event_data = {
         "type": "LECTURE_ENDED",
         "lecture_id": lecture_id,
         "student_id": "system",
         "student_name": "System",
-        "timestamp": ended_at.isoformat(),
+        "timestamp": ended_at_str,
     }
-    await publish_lecture_event(lecture_id, event_data)
+    try:
+        await publish_lecture_event(lecture_id, event_data)
+    except Exception as e:
+        logger.warn("[END_LECTURE] Error publishing LECTURE_ENDED event: %s", e)
 
     return {
         "status": "ended",
