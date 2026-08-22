@@ -54,6 +54,7 @@ function FacultyDashboardContent() {
   const [sessionEnded, setSessionEnded] = useState(false);
   const [summary, setSummary] = useState<any>(null);
   const [notificationPermission, setNotificationPermission] = useState<string>("default");
+  const [showPermissionHelp, setShowPermissionHelp] = useState(false);
 
   // Track recent system notifications to deduplicate within a short window
   const lastSystemNotificationRef = useRef<Record<string, { type: string; reason?: string; time: number }>>({});
@@ -482,19 +483,44 @@ function FacultyDashboardContent() {
           </div>
 
           {/* Permission Status Indicator */}
-          <div className="hidden sm:flex items-center">
+          <div className="relative hidden sm:flex items-center">
             {notificationPermission === "granted" ? (
               <div className="flex items-center space-x-1.5 px-3 py-1 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/40 text-emerald-700 dark:text-emerald-300 rounded-full text-xs font-medium">
                 <Bell className="w-3.5 h-3.5" />
-                <span>OS Alerts Active</span>
+                <span>OS Alerts On</span>
               </div>
             ) : notificationPermission === "denied" ? (
-              <div className="flex items-center space-x-1.5 px-3 py-1 bg-gray-100 dark:bg-gray-800 text-gray-500 rounded-full text-xs font-medium" title="Enable notifications in browser settings for background OS alerts">
-                <BellOff className="w-3.5 h-3.5" />
-                <span>OS Alerts Blocked</span>
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setShowPermissionHelp(prev => !prev)}
+                  className="flex items-center space-x-1.5 px-3 py-1 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/40 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40 rounded-full text-xs font-medium transition cursor-pointer"
+                >
+                  <BellOff className="w-3.5 h-3.5" />
+                  <span>OS Alerts Blocked</span>
+                  <span className="underline opacity-80 ml-1">Fix</span>
+                </button>
+                {showPermissionHelp && (
+                  <div className="absolute left-0 top-full mt-2 w-72 p-3.5 bg-white dark:bg-[#1f1f1f] rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 z-50 text-xs space-y-2 animate-toast-enter">
+                    <p className="font-semibold text-gray-900 dark:text-white">
+                      Notifications are blocked in your browser
+                    </p>
+                    <p className="text-gray-600 dark:text-gray-300 leading-relaxed">
+                      To receive alerts outside LECTRA (like when presenting in VS Code), click the <strong>lock / tune icon</strong> in your browser address bar and set <strong>Notifications</strong> to <strong>Allow</strong>.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setShowPermissionHelp(false)}
+                      className="w-full py-1 text-center bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 rounded-lg text-gray-800 dark:text-gray-200 font-medium"
+                    >
+                      Got it
+                    </button>
+                  </div>
+                )}
               </div>
             ) : (
               <button
+                type="button"
                 onClick={requestPermission}
                 className="flex items-center space-x-1.5 px-3 py-1 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300 hover:bg-blue-100 rounded-full text-xs font-medium transition"
               >

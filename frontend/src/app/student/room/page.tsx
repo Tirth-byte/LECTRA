@@ -76,24 +76,39 @@ function StudentViewerContent() {
   }, [calculatePresence, reportPresence]);
 
   const [sessionStatus, setSessionStatus] = useState("WAITING");
+  const isEnded = sessionStatus === "ENDED";
 
   useEffect(() => {
+    if (isEnded) return;
+
     // SSE for status updates
     const normalizedLectureId = (lectureId || "").toUpperCase();
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
     const eventSource = new EventSource(`${apiUrl}/api/lectures/${normalizedLectureId}/events`);
     
+    eventSource.onopen = () => {
+      console.log(`[STUDENT_SSE] Connected to event stream for ${normalizedLectureId}`);
+    };
+
     eventSource.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
         if (data.type === "STATUS_CHANGE") {
           setSessionStatus(data.status);
-        } else if (data.type === "END") {
+        } else if (data.type === "LECTURE_ENDED" || data.type === "END") {
+          console.log("[STUDENT_SSE] Received class ended event");
           setSessionStatus("ENDED");
+          if (document.fullscreenElement && document.exitFullscreen) {
+            document.exitFullscreen().catch(() => {});
+          }
         }
       } catch (err) {
         console.error("[STUDENT_SSE] error parsing message", err);
       }
+    };
+
+    eventSource.onerror = (err) => {
+      console.warn("[STUDENT_SSE] EventSource error", err);
     };
 
     const handleVisibilityChange = () => {
@@ -102,7 +117,6 @@ function StudentViewerContent() {
     };
     
     const handleBlur = () => {
-      // Small debounce so clicking internal controls / video elements doesn't trigger false away
       if (blurTimeoutRef.current) clearTimeout(blurTimeoutRef.current);
       blurTimeoutRef.current = setTimeout(() => {
         if (!document.hasFocus() || document.visibilityState === "hidden") {
@@ -130,10 +144,10 @@ function StudentViewerContent() {
     window.addEventListener("focus", handleFocus);
     document.addEventListener("fullscreenchange", handleFullscreenChange);
 
-    // Initial check (delay slightly for DOM ready)
+    // Initial check
     const initialTimer = setTimeout(updatePresence, 500);
 
-    // Heartbeat to keep connection and state alive in Redis & DB
+    // Heartbeat
     const heartbeatInterval = setInterval(() => {
       const state = actualStateRef.current || "VIEWING";
       if (!lectureId || !studentId) return;
@@ -161,7 +175,7 @@ function StudentViewerContent() {
         keepalive: true
       }).catch(() => {});
     };
-  }, [updatePresence, lectureId, studentId]);
+  }, [updatePresence, lectureId, studentId, isEnded]);
 
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
@@ -170,7 +184,7 @@ function StudentViewerContent() {
       });
     } else {
       if (document.exitFullscreen) {
-        document.exitFullscreen();
+        document.exitFullscreen().catch(() => {});
       }
     }
   };
@@ -179,10 +193,24 @@ function StudentViewerContent() {
 
   if (sessionStatus === "ENDED") {
     return (
-      <div className="flex flex-col items-center justify-center space-y-4 text-gray-500 h-screen w-full bg-black text-white">
-        <ShieldAlert className="w-16 h-16 opacity-50 text-red-500" />
-        <p className="text-2xl font-bold">The lecture has ended</p>
-        <a href="/student" className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">Return to Home</a>
+      <div className="min-h-screen bg-gray-50 dark:bg-[#0a0a0a] flex items-center justify-center p-6 text-gray-900 dark:text-white">
+        <div className="max-w-md w-full bg-white dark:bg-[#1a1a1a] rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 p-8 text-center space-y-6 animate-toast-enter">
+          <div className="w-16 h-16 bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 rounded-2xl flex items-center justify-center mx-auto border border-blue-100 dark:border-blue-900/40">
+            <MonitorPlay className="w-8 h-8" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-2xl font-bold tracking-tight">Class Ended</h1>
+            <p className="text-sm text-gray-500 dark:text-gray-400 leading-relaxed">
+              Your instructor has ended this lecture. Thank you for participating.
+            </p>
+          </div>
+          <a
+            href="/student"
+            className="inline-flex items-center justify-center w-full px-6 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl transition-colors shadow-sm"
+          >
+            Back to Home
+          </a>
+        </div>
       </div>
     );
   }

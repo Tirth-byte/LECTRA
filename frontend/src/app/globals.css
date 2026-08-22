@@ -30,7 +30,7 @@ body {
 @keyframes toast-enter {
   0% {
     opacity: 0;
-    transform: translate3d(24px, 0, 0) scale(0.95);
+    transform: translate3d(20px, 0, 0) scale(0.97);
   }
   100% {
     opacity: 1;
@@ -45,14 +45,26 @@ body {
   }
   100% {
     opacity: 0;
-    transform: translate3d(12px, -6px, 0) scale(0.92);
+    transform: translate3d(12px, 0, 0) scale(0.98);
   }
 }
 
 .animate-toast-enter {
-  animation: toast-enter 0.32s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: toast-enter 0.22s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  will-change: transform, opacity;
 }
 
 .animate-toast-exit {
-  animation: toast-exit 0.24s cubic-bezier(0.4, 0, 1, 1) forwards;
+  animation: toast-exit 0.19s cubic-bezier(0.4, 0, 1, 1) forwards;
+  will-change: transform, opacity;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-toast-enter,
+  .animate-toast-exit {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transform: none !important;
+  }
 }

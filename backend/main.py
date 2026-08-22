@@ -261,16 +261,14 @@ async def join_lecture(
     student_name = student.name.strip()
 
     def check_lecture():
-        return (
-            db.query(models.Lecture)
-            .filter(models.Lecture.id == lecture_id, models.Lecture.status != "ENDED")
-            .first()
-        )
+        return db.query(models.Lecture).filter(models.Lecture.id == lecture_id).first()
 
     db_lecture = await run_in_threadpool(check_lecture)
 
     if not db_lecture:
-        raise HTTPException(status_code=404, detail="Active lecture not found")
+        raise HTTPException(status_code=404, detail="Lecture not found")
+    if db_lecture.status == "ENDED":
+        raise HTTPException(status_code=400, detail="This class has ended")
 
     student_id = str(uuid.uuid4())
     grant = VideoGrants(room=lecture_id, room_join=True, can_publish=False, can_subscribe=True)
@@ -469,10 +467,9 @@ async def end_lecture(lecture_id: str, db: Session = Depends(get_db)):
     if not result:
         raise HTTPException(status_code=404, detail="Lecture not found")
 
-    ended_at, unique_students, total_events = result
-
     event_data = {
-        "type": "END",
+        "type": "LECTURE_ENDED",
+        "lecture_id": lecture_id,
         "student_id": "system",
         "student_name": "System",
         "timestamp": ended_at.isoformat(),
