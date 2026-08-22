@@ -63,7 +63,7 @@ function FacultyDashboardContent() {
     }
   }, []);
 
-  // Fetch initial participants
+  // Fetch initial and updated participants
   const fetchParticipants = useCallback(async () => {
     if (!lectureId) return;
     try {
@@ -71,18 +71,57 @@ function FacultyDashboardContent() {
       const res = await fetch(`${apiUrl}/api/lectures/${lectureId.toUpperCase()}/participants`);
       if (res.ok) {
         const data = await res.json();
-        const initialMap: Record<string, StudentState> = {};
-        for (const p of data.participants || []) {
-          initialMap[p.id] = {
-            id: p.id,
-            name: p.name,
-            status: p.status,
-            lastUpdate: p.lastUpdate,
-            reason: p.reason,
-            awayStartedAt: p.status === "AWAY" ? Date.now() : undefined,
-          };
-        }
-        setStudents(prev => ({ ...initialMap, ...prev }));
+        setStudents(prev => {
+          const updated = { ...prev };
+          for (const p of data.participants || []) {
+            const prevState = prev[p.id];
+            let awayStartedAt = prevState?.awayStartedAt;
+            
+            // Check state transition from poll
+            if (p.status === "AWAY" && prevState?.status && prevState.status !== "AWAY") {
+              awayStartedAt = Date.now();
+              const alertId = `${p.id}-${Date.now()}-${Math.random()}`;
+              setToastAlerts(tPrev => [{
+                id: alertId,
+                type: "AWAY",
+                student_id: p.id,
+                student_name: p.name,
+                reason: p.reason,
+                timestamp: p.lastUpdate
+              }, ...tPrev].slice(0, 4));
+              setTimeout(() => {
+                setToastAlerts(tPrev => tPrev.filter(t => t.id !== alertId));
+              }, 5000);
+            } else if (["VIEWING", "JOIN", "RECONNECTED"].includes(p.status) && prevState?.status === "AWAY") {
+              const durationStr = awayStartedAt ? ` (Away for ${((Date.now() - awayStartedAt) / 1000).toFixed(1)}s)` : '';
+              awayStartedAt = undefined;
+              const alertId = `${p.id}-${Date.now()}-${Math.random()}`;
+              setToastAlerts(tPrev => [{
+                id: alertId,
+                type: "VIEWING",
+                student_id: p.id,
+                student_name: p.name,
+                durationStr,
+                timestamp: p.lastUpdate
+              }, ...tPrev].slice(0, 4));
+              setTimeout(() => {
+                setToastAlerts(tPrev => tPrev.filter(t => t.id !== alertId));
+              }, 5000);
+            } else if (p.status === "AWAY" && !awayStartedAt) {
+              awayStartedAt = Date.now();
+            }
+
+            updated[p.id] = {
+              id: p.id,
+              name: p.name,
+              status: p.status,
+              lastUpdate: p.lastUpdate,
+              reason: p.reason,
+              awayStartedAt
+            };
+          }
+          return updated;
+        });
         console.log(`[FACULTY] loaded ${data.participants?.length || 0} participants for ${lectureId}`);
       }
     } catch (err) {
@@ -107,7 +146,10 @@ function FacultyDashboardContent() {
     // Initial participant fetch
     fetchParticipants();
 
-    // Connect to SSE for events
+    // Polling backup every 2 seconds to guarantee sync even across proxy/network buffering
+    const pollInterval = setInterval(fetchParticipants, 2000);
+
+    // Connect to SSE for instant events
     const eventSource = new EventSource(`${apiUrl}/api/lectures/${normalizedLectureId}/events`);
     
     eventSource.onopen = () => {
@@ -204,6 +246,7 @@ function FacultyDashboardContent() {
 
     return () => {
       eventSource.close();
+      clearInterval(pollInterval);
     };
   }, [lectureId, facultyId, fetchParticipants]);
 
