@@ -10,7 +10,7 @@ import {
   useConnectionState
 } from "@livekit/components-react";
 import { Track, LocalVideoTrack, createLocalScreenTracks, ConnectionState } from "livekit-client";
-import { Users, MonitorUp, StopCircle, EyeOff, UserCheck, AlertCircle } from "lucide-react";
+import { Users, MonitorUp, StopCircle, EyeOff, UserCheck, AlertCircle, Bell, BellOff, ArrowRight } from "lucide-react";
 
 type StudentEvent = {
   type: string;
@@ -50,18 +50,158 @@ function FacultyDashboardContent() {
   const [error, setError] = useState("");
   const [students, setStudents] = useState<Record<string, StudentState>>({});
   const [notifications, setNotifications] = useState<StudentEvent[]>([]);
-  const [toastAlerts, setToastAlerts] = useState<Array<StudentEvent & { id: string }>>([]);
-  const notificationQueue = useRef<StudentEvent[]>([]);
-  const notificationTimer = useRef<any>(null);
+  const [toastAlerts, setToastAlerts] = useState<Array<StudentEvent & { id: string; isExiting?: boolean }>>([]);
   const [sessionEnded, setSessionEnded] = useState(false);
   const [summary, setSummary] = useState<any>(null);
+  const [notificationPermission, setNotificationPermission] = useState<string>("default");
+
+  // Track recent system notifications to deduplicate within a short window
+  const lastSystemNotificationRef = useRef<Record<string, { type: string; reason?: string; time: number }>>({});
+  const originalTitleRef = useRef<string>("");
 
   useEffect(() => {
-    // Request notification permission
-    if ("Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission();
+    if (typeof window !== "undefined") {
+      originalTitleRef.current = document.title || "Lectra - Faculty Room";
+      if ("Notification" in window) {
+        setNotificationPermission(Notification.permission);
+      }
     }
   }, []);
+
+  const requestPermission = async () => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      try {
+        const result = await Notification.requestPermission();
+        setNotificationPermission(result);
+      } catch (err) {
+        console.error("Failed to request permission", err);
+      }
+    }
+  };
+
+  // Helper: Dispatch Native System Notification (Cross-App when tab is not focused/visible)
+  const triggerSystemNotification = useCallback((event: StudentEvent) => {
+    if (typeof window === "undefined") return;
+
+    const isTabActive = document.visibilityState === "visible" && document.hasFocus();
+    
+    // Only dispatch OS-level system notification if the faculty is NOT actively focused on the LECTRA tab
+    if (!isTabActive) {
+      // 1. Optional document title fallback
+      const reasonLabel = event.type === "AWAY"
+        ? event.reason === "PAGE_HIDDEN" ? "switched tabs" : event.reason === "FULLSCREEN_EXITED" ? "exited Focus Mode" : "left window"
+        : event.type === "VIEWING" ? "returned" : event.type.toLowerCase();
+      document.title = `(${event.student_name} ${reasonLabel}) ${originalTitleRef.current}`;
+
+      // 2. Check deduplication for system notification (avoid repeat alerts for same student within 3s)
+      const now = Date.now();
+      const last = lastSystemNotificationRef.current[event.student_id];
+      if (last && last.type === event.type && last.reason === event.reason && (now - last.time < 3000)) {
+        return;
+      }
+      lastSystemNotificationRef.current[event.student_id] = {
+        type: event.type,
+        reason: event.reason,
+        time: now
+      };
+
+      // 3. Dispatch OS Notification if permission granted
+      if ("Notification" in window && Notification.permission === "granted") {
+        let title = "LECTRA Focus Alert";
+        let body = `${event.student_name} changed activity`;
+
+        if (event.type === "AWAY") {
+          if (event.reason === "PAGE_HIDDEN") {
+            title = `⚠ ${event.student_name} switched tabs`;
+            body = `${event.student_name} left the lecture to view another tab or app.`;
+          } else if (event.reason === "FULLSCREEN_EXITED") {
+            title = `⚠ ${event.student_name} exited Focus Mode`;
+            body = `${event.student_name} minimized or left fullscreen view.`;
+          } else if (event.reason === "WINDOW_BLURRED") {
+            title = `⚠ ${event.student_name} left lecture window`;
+            body = `${event.student_name} switched focus to another desktop window.`;
+          } else {
+            title = `⚠ ${event.student_name} switched away`;
+            body = `Student is no longer actively watching the stream.`;
+          }
+        } else if (event.type === "DISCONNECTED") {
+          title = `✕ ${event.student_name} disconnected`;
+          body = `Student lost connection to the lecture broadcast.`;
+        } else if (event.type === "JOIN") {
+          title = `● ${event.student_name} joined`;
+          body = `Student joined lecture ${lectureId.toUpperCase()}`;
+        } else if (event.type === "VIEWING" && event.durationStr) {
+          title = `✓ ${event.student_name} returned`;
+          body = `Student resumed watching the broadcast.`;
+        } else {
+          // Avoid spamming OS notifications for routine return/heartbeats
+          return;
+        }
+
+        try {
+          const notification = new Notification(title, {
+            body,
+            icon: "/favicon.ico",
+            tag: `lectra-${event.student_id}-${event.type}`, // Group repeat events by student
+            requireInteraction: false
+          });
+
+          notification.onclick = () => {
+            window.focus();
+            notification.close();
+          };
+        } catch (err) {
+          console.warn("Could not display native notification", err);
+        }
+      }
+    } else {
+      // Tab is active: restore normal document title
+      document.title = originalTitleRef.current;
+    }
+  }, [lectureId]);
+
+  // Restore title when user focuses window
+  useEffect(() => {
+    const handleFocus = () => {
+      if (typeof document !== "undefined") {
+        document.title = originalTitleRef.current;
+      }
+    };
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
+  }, []);
+
+  // Helper: Add Apple-style In-App Toast
+  const triggerInAppToast = useCallback((event: StudentEvent) => {
+    const alertId = `${event.student_id}-${Date.now()}-${Math.random()}`;
+    const toastItem = { ...event, id: alertId };
+    
+    setToastAlerts(prev => [toastItem, ...prev].slice(0, 4));
+
+    // Smooth exit timer
+    setTimeout(() => {
+      setToastAlerts(prev =>
+        prev.map(t => (t.id === alertId ? { ...t, isExiting: true } : t))
+      );
+      setTimeout(() => {
+        setToastAlerts(prev => prev.filter(t => t.id !== alertId));
+      }, 300);
+    }, 4500);
+  }, []);
+
+  // Process incoming event for both layers
+  const handleIncomingEvent = useCallback((event: StudentEvent) => {
+    console.log(`[FACULTY] processing event: ${event.type} for ${event.student_name}`);
+
+    // Layer 1: In-app Apple-like toast
+    triggerInAppToast(event);
+
+    // Layer 2: System-wide native notification (when in VS Code / PowerPoint / background)
+    triggerSystemNotification(event);
+
+    // Persistent recent activity
+    setNotifications(prev => [event, ...prev].slice(0, 15));
+  }, [triggerInAppToast, triggerSystemNotification]);
 
   // Fetch initial and updated participants
   const fetchParticipants = useCallback(async () => {
@@ -80,33 +220,23 @@ function FacultyDashboardContent() {
             // Check state transition from poll
             if (p.status === "AWAY" && prevState?.status && prevState.status !== "AWAY") {
               awayStartedAt = Date.now();
-              const alertId = `${p.id}-${Date.now()}-${Math.random()}`;
-              setToastAlerts(tPrev => [{
-                id: alertId,
+              handleIncomingEvent({
                 type: "AWAY",
                 student_id: p.id,
                 student_name: p.name,
                 reason: p.reason,
                 timestamp: p.lastUpdate
-              }, ...tPrev].slice(0, 4));
-              setTimeout(() => {
-                setToastAlerts(tPrev => tPrev.filter(t => t.id !== alertId));
-              }, 5000);
+              });
             } else if (["VIEWING", "JOIN", "RECONNECTED"].includes(p.status) && prevState?.status === "AWAY") {
               const durationStr = awayStartedAt ? ` (Away for ${((Date.now() - awayStartedAt) / 1000).toFixed(1)}s)` : '';
               awayStartedAt = undefined;
-              const alertId = `${p.id}-${Date.now()}-${Math.random()}`;
-              setToastAlerts(tPrev => [{
-                id: alertId,
+              handleIncomingEvent({
                 type: "VIEWING",
                 student_id: p.id,
                 student_name: p.name,
                 durationStr,
                 timestamp: p.lastUpdate
-              }, ...tPrev].slice(0, 4));
-              setTimeout(() => {
-                setToastAlerts(tPrev => tPrev.filter(t => t.id !== alertId));
-              }, 5000);
+              });
             } else if (p.status === "AWAY" && !awayStartedAt) {
               awayStartedAt = Date.now();
             }
@@ -122,12 +252,11 @@ function FacultyDashboardContent() {
           }
           return updated;
         });
-        console.log(`[FACULTY] loaded ${data.participants?.length || 0} participants for ${lectureId}`);
       }
     } catch (err) {
       console.error("[FACULTY] failed to fetch participants", err);
     }
-  }, [lectureId]);
+  }, [lectureId, handleIncomingEvent]);
 
   useEffect(() => {
     if (!lectureId || !facultyId) return;
@@ -146,8 +275,8 @@ function FacultyDashboardContent() {
     // Initial participant fetch
     fetchParticipants();
 
-    // Polling backup every 2 seconds to guarantee sync even across proxy/network buffering
-    const pollInterval = setInterval(fetchParticipants, 2000);
+    // Polling backup every 2.5 seconds to guarantee sync
+    const pollInterval = setInterval(fetchParticipants, 2500);
 
     // Connect to SSE for instant events
     const eventSource = new EventSource(`${apiUrl}/api/lectures/${normalizedLectureId}/events`);
@@ -163,7 +292,6 @@ function FacultyDashboardContent() {
         if (data.type === "PING" || data.type === "STATUS_CHANGE") return;
 
         const event = data as StudentEvent;
-        console.log(`[SSE] faculty subscriber received ${event.type} for ${event.student_name}`);
 
         setStudents(prev => {
           const prevState = prev[event.student_id];
@@ -179,8 +307,6 @@ function FacultyDashboardContent() {
              awayStartedAt = undefined;
           }
 
-          console.log(`[FACULTY] participant updated: ${event.student_name} -> ${event.type}`);
-
           return {
             ...prev,
             [event.student_id]: {
@@ -194,43 +320,8 @@ function FacultyDashboardContent() {
           };
         });
 
-        // Trigger Right-Side Floating Toast Alert
-        const alertId = `${event.student_id}-${Date.now()}-${Math.random()}`;
-        const toastItem = { ...event, id: alertId };
-        setToastAlerts(prev => [toastItem, ...prev].slice(0, 4));
-
-        // Auto remove toast after 5s
-        setTimeout(() => {
-          setToastAlerts(prev => prev.filter(t => t.id !== alertId));
-        }, 5000);
-
-        // Add to persistent recent activity feed
-        setNotifications(prev => [event, ...prev].slice(0, 10));
-        
-        // System Notification grouping for backgrounded faculty tab
-        if ("Notification" in window && Notification.permission === "granted" && document.hidden) {
-          notificationQueue.current.push(event);
-          if (notificationTimer.current) clearTimeout(notificationTimer.current);
-          
-          notificationTimer.current = setTimeout(() => {
-            const queue = notificationQueue.current;
-            if (queue.length === 1) {
-              const action = queue[0].type === "AWAY" ? "left lecture view" : 
-                             queue[0].type === "VIEWING" ? `returned` :
-                             queue[0].type === "JOIN" ? "joined the lecture" : "disconnected";
-              new Notification(`${queue[0].student_name} ${action}`, {
-                body: `${queue[0].durationStr || 'just now'}`,
-                icon: "/favicon.ico"
-              });
-            } else if (queue.length > 1) {
-              new Notification(`${queue.length} students had activity`, {
-                body: `Open Lectra to review activity.`,
-                icon: "/favicon.ico"
-              });
-            }
-            notificationQueue.current = [];
-          }, 1500);
-        }
+        // Trigger two-layer notifications
+        handleIncomingEvent(event);
         
         if (event.type === "END") {
           setSessionEnded(true);
@@ -241,14 +332,14 @@ function FacultyDashboardContent() {
     };
 
     eventSource.onerror = (err) => {
-      console.warn("[SSE] EventSource connection error, will auto-reconnect", err);
+      console.warn("[SSE] EventSource error, auto-reconnecting", err);
     };
 
     return () => {
       eventSource.close();
       clearInterval(pollInterval);
     };
-  }, [lectureId, facultyId, fetchParticipants]);
+  }, [lectureId, facultyId, fetchParticipants, handleIncomingEvent]);
 
   const endLecture = async () => {
     if (!confirm("Are you sure you want to end this lecture?")) return;
@@ -305,57 +396,72 @@ function FacultyDashboardContent() {
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-[#0a0a0a] flex flex-col relative">
-      {/* Right Side Floating Notifications Stack */}
-      <div className="fixed top-20 right-6 z-50 flex flex-col space-y-3 pointer-events-none max-w-sm w-full">
+      {/* LAYER 1: Apple-Style Right-Side In-App Floating Toasts */}
+      <div className="fixed top-20 right-6 z-50 flex flex-col space-y-2.5 pointer-events-none max-w-xs sm:max-w-sm w-full">
         {toastAlerts.map(toast => (
           <div
             key={toast.id}
-            className={`pointer-events-auto p-4 rounded-2xl shadow-xl border backdrop-blur-md transition-all duration-300 transform translate-x-0 ${
+            className={`pointer-events-auto px-4 py-3.5 rounded-[18px] backdrop-blur-xl border transition-all duration-300 shadow-[0_8px_30px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.35)] ${
+              toast.isExiting ? "animate-toast-exit" : "animate-toast-enter"
+            } ${
               toast.type === "AWAY"
-                ? "bg-amber-500/15 dark:bg-amber-950/60 border-amber-500/30 text-amber-900 dark:text-amber-100"
+                ? "bg-amber-50/85 dark:bg-amber-950/75 border-amber-200/70 dark:border-amber-800/50 text-amber-950 dark:text-amber-100"
                 : toast.type === "VIEWING"
-                ? "bg-emerald-500/15 dark:bg-emerald-950/60 border-emerald-500/30 text-emerald-900 dark:text-emerald-100"
+                ? "bg-emerald-50/85 dark:bg-emerald-950/75 border-emerald-200/70 dark:border-emerald-800/50 text-emerald-950 dark:text-emerald-100"
                 : toast.type === "JOIN"
-                ? "bg-blue-500/15 dark:bg-blue-950/60 border-blue-500/30 text-blue-900 dark:text-blue-100"
-                : "bg-red-500/15 dark:bg-red-950/60 border-red-500/30 text-red-900 dark:text-red-100"
+                ? "bg-blue-50/85 dark:bg-blue-950/75 border-blue-200/70 dark:border-blue-800/50 text-blue-950 dark:text-blue-100"
+                : "bg-red-50/85 dark:bg-red-950/75 border-red-200/70 dark:border-red-800/50 text-red-950 dark:text-red-100"
             }`}
           >
             <div className="flex items-start space-x-3">
-              <div className="mt-0.5">
+              <div className="mt-0.5 shrink-0">
                 {toast.type === "AWAY" ? (
-                  <EyeOff className="w-5 h-5 text-amber-500" />
+                  <div className="w-6 h-6 rounded-full bg-amber-500/20 dark:bg-amber-500/30 flex items-center justify-center">
+                    <EyeOff className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                  </div>
                 ) : toast.type === "VIEWING" ? (
-                  <UserCheck className="w-5 h-5 text-emerald-500" />
+                  <div className="w-6 h-6 rounded-full bg-emerald-500/20 dark:bg-emerald-500/30 flex items-center justify-center">
+                    <UserCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                  </div>
                 ) : toast.type === "JOIN" ? (
-                  <Users className="w-5 h-5 text-blue-500" />
+                  <div className="w-6 h-6 rounded-full bg-blue-500/20 dark:bg-blue-500/30 flex items-center justify-center">
+                    <Users className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                  </div>
                 ) : (
-                  <AlertCircle className="w-5 h-5 text-red-500" />
+                  <div className="w-6 h-6 rounded-full bg-red-500/20 dark:bg-red-500/30 flex items-center justify-center">
+                    <AlertCircle className="w-3.5 h-3.5 text-red-600 dark:text-red-400" />
+                  </div>
                 )}
               </div>
-              <div className="flex-1">
-                <p className="font-semibold text-sm">
-                  {toast.type === "AWAY" ? (
-                    `⚠ ${toast.student_name} left the lecture`
-                  ) : toast.type === "VIEWING" ? (
-                    `✓ ${toast.student_name} returned to lecture`
-                  ) : toast.type === "JOIN" ? (
-                    `● ${toast.student_name} joined`
-                  ) : (
-                    `✕ ${toast.student_name} disconnected`
-                  )}
-                </p>
-                <p className="text-xs opacity-80 mt-0.5">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-baseline justify-between">
+                  <p className="font-semibold text-xs tracking-tight truncate pr-2">
+                    {toast.type === "AWAY" ? (
+                      `${toast.student_name} switched away`
+                    ) : toast.type === "VIEWING" ? (
+                      `${toast.student_name} returned`
+                    ) : toast.type === "JOIN" ? (
+                      `${toast.student_name} joined`
+                    ) : (
+                      `${toast.student_name} disconnected`
+                    )}
+                  </p>
+                  <span className="text-[10px] opacity-60 font-medium shrink-0">
+                    Just now
+                  </span>
+                </div>
+                <p className="text-[11px] opacity-80 mt-0.5 leading-snug truncate">
                   {toast.type === "AWAY"
                     ? toast.reason === "PAGE_HIDDEN"
                       ? "Switched browser tab or minimized"
                       : toast.reason === "WINDOW_BLURRED"
-                      ? "Changed application window"
+                      ? "Changed active window"
                       : toast.reason === "FULLSCREEN_EXITED"
-                      ? "Exited fullscreen mode"
-                      : "Student switched away"
+                      ? "Exited Focus Mode"
+                      : "Left the lecture view"
                     : toast.durationStr
                     ? `Returned after ${toast.durationStr.replace(/[()]/g, "")}`
-                    : "Just now"}
+                    : "Active in lecture"}
                 </p>
               </div>
             </div>
@@ -364,15 +470,41 @@ function FacultyDashboardContent() {
       </div>
 
       <header className="bg-white dark:bg-[#121212] border-b border-gray-200 dark:border-gray-800 px-6 py-4 flex items-center justify-between sticky top-0 z-10">
-        <div>
-          <h1 className="text-xl font-semibold text-gray-900 dark:text-white">Active Lecture</h1>
-          <div className="flex items-center space-x-2 mt-1">
-            <span className="text-sm text-gray-500 dark:text-gray-400">Class Code:</span>
-            <span className="px-2 py-1 bg-gray-100 dark:bg-[#2a2a2a] rounded font-mono text-sm font-bold tracking-wider text-gray-900 dark:text-gray-100">
-              {lectureId.toUpperCase()}
-            </span>
+        <div className="flex items-center space-x-6">
+          <div>
+            <h1 className="text-xl font-semibold text-gray-900 dark:text-white">Active Lecture</h1>
+            <div className="flex items-center space-x-2 mt-1">
+              <span className="text-sm text-gray-500 dark:text-gray-400">Class Code:</span>
+              <span className="px-2 py-1 bg-gray-100 dark:bg-[#2a2a2a] rounded font-mono text-sm font-bold tracking-wider text-gray-900 dark:text-gray-100">
+                {lectureId.toUpperCase()}
+              </span>
+            </div>
+          </div>
+
+          {/* Permission Status Indicator */}
+          <div className="hidden sm:flex items-center">
+            {notificationPermission === "granted" ? (
+              <div className="flex items-center space-x-1.5 px-3 py-1 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/40 text-emerald-700 dark:text-emerald-300 rounded-full text-xs font-medium">
+                <Bell className="w-3.5 h-3.5" />
+                <span>OS Alerts Active</span>
+              </div>
+            ) : notificationPermission === "denied" ? (
+              <div className="flex items-center space-x-1.5 px-3 py-1 bg-gray-100 dark:bg-gray-800 text-gray-500 rounded-full text-xs font-medium" title="Enable notifications in browser settings for background OS alerts">
+                <BellOff className="w-3.5 h-3.5" />
+                <span>OS Alerts Blocked</span>
+              </div>
+            ) : (
+              <button
+                onClick={requestPermission}
+                className="flex items-center space-x-1.5 px-3 py-1 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300 hover:bg-blue-100 rounded-full text-xs font-medium transition"
+              >
+                <Bell className="w-3.5 h-3.5" />
+                <span>Enable OS Alerts</span>
+              </button>
+            )}
           </div>
         </div>
+
         <button
           onClick={endLecture}
           className="px-4 py-2 bg-red-50 text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/30 rounded-lg text-sm font-medium transition-colors"

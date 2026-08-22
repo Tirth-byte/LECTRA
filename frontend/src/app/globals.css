@@ -26,3 +26,33 @@ body {
   padding: 0;
   overflow-x: hidden;
 }
+
+@keyframes toast-enter {
+  0% {
+    opacity: 0;
+    transform: translate3d(24px, 0, 0) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes toast-exit {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(12px, -6px, 0) scale(0.92);
+  }
+}
+
+.animate-toast-enter {
+  animation: toast-enter 0.32s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-toast-exit {
+  animation: toast-exit 0.24s cubic-bezier(0.4, 0, 1, 1) forwards;
+}
