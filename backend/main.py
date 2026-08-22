@@ -35,6 +35,69 @@ LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "devkey")
 LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "lectra_super_secret_key_1234567890_!")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 
+# VAPID Web Push Keys
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "BCWdovh0jjaE521xDcgtCgqW4uxnJ7mklCVKb4-_HNPF3MDeGBxaF0yOsRzN_G_gzwKLWOv6vWJuA2HuggnNhU0")
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "fL2rz5De-UHvJzhA4zTufCxyCSXlQA1VZ8KQfUQ77fA")
+VAPID_CLAIMS = {"sub": os.getenv("VAPID_SUBJECT", "mailto:admin@lectra.app")}
+
+try:
+    from pywebpush import webpush, WebPushException
+except ImportError:
+    webpush = None
+    WebPushException = Exception
+
+def send_web_push_sync(lecture_id: str, payload_data: dict):
+    """Synchronous worker to dispatch Web Push to all active subscriptions for a lecture."""
+    if not webpush:
+        logger.warning("[WEB PUSH] pywebpush not available")
+        return
+
+    db = SessionLocal()
+    try:
+        subscriptions = (
+            db.query(models.PushSubscription)
+            .filter(
+                models.PushSubscription.lecture_id == lecture_id,
+                models.PushSubscription.active == True,
+            )
+            .all()
+        )
+        if not subscriptions:
+            return
+
+        logger.info("[WEB PUSH] sending lecture=%s event=%s count=%d", lecture_id, payload_data.get("type", "ALERT"), len(subscriptions))
+        payload_json = json.dumps(payload_data)
+
+        for sub in subscriptions:
+            sub_info = {
+                "endpoint": sub.endpoint,
+                "keys": {
+                    "p256dh": sub.p256dh,
+                    "auth": sub.auth,
+                },
+            }
+            try:
+                webpush(
+                    subscription_info=sub_info,
+                    data=payload_json,
+                    vapid_private_key=VAPID_PRIVATE_KEY,
+                    vapid_claims=VAPID_CLAIMS,
+                )
+                logger.info("[WEB PUSH] delivered subscription_id=%s", sub.id)
+            except WebPushException as ex:
+                status_code = getattr(getattr(ex, "response", None), "status_code", None)
+                logger.warning("[WEB PUSH] delivery failed for sub=%s status=%s: %s", sub.id, status_code, ex)
+                if status_code in (404, 410):
+                    # Subscription is expired or unregistered
+                    sub.active = False
+                    db.commit()
+            except Exception as ex:
+                logger.warning("[WEB PUSH] unexpected error for sub=%s: %s", sub.id, ex)
+    except Exception as exc:
+        logger.exception("[WEB PUSH] Error in send_web_push_sync: %s", exc)
+    finally:
+        db.close()
+
 # Production-safe connection pool for Redis (supports redis:// and Upstash rediss:// with TLS)
 redis_pool = redis.ConnectionPool.from_url(
     REDIS_URL,
@@ -451,7 +514,122 @@ async def update_presence(
     logger.info("[REDIS] publishing presence event %s for %s on %s", event_type, student_name, lecture_id)
     await publish_lecture_event(lecture_id, event_data)
 
+    # Trigger Web Push on Backend for Cross-App OS Delivery
+    if event_type in ("AWAY", "DISCONNECTED", "FULLSCREEN_EXITED"):
+        title = "LECTRA"
+        if event_type == "AWAY":
+            if event.reason == "PAGE_HIDDEN":
+                body = f"⚠ {student_name} switched tabs"
+            elif event.reason == "FULLSCREEN_EXITED":
+                body = f"⚠ {student_name} exited Focus Mode"
+            elif event.reason == "WINDOW_BLURRED":
+                body = f"⚠ {student_name} left the lecture window"
+            else:
+                body = f"⚠ {student_name} switched away"
+        elif event_type == "DISCONNECTED":
+            body = f"● {student_name} disconnected"
+        else:
+            body = f"⚠ {student_name} changed activity"
+
+        push_payload = {
+            "title": title,
+            "body": body,
+            "tag": f"lectra-{lecture_id}-{student_id}-{event_type}",
+            "data": {
+                "lecture_id": lecture_id,
+                "student_id": student_id,
+                "type": event_type,
+                "url": f"/faculty/room?lectureId={lecture_id}",
+            },
+        }
+        background_tasks.add_task(send_web_push_sync, lecture_id, push_payload)
+
     return {"status": "ok"}
+
+
+@app.get("/api/push/public-key")
+def get_vapid_public_key():
+    return {"public_key": VAPID_PUBLIC_KEY}
+
+
+@app.post("/api/lectures/{lecture_id}/push-subscriptions")
+def save_push_subscription(
+    lecture_id: str,
+    sub_data: schemas.PushSubscriptionCreate,
+    db: Session = Depends(get_db),
+):
+    lecture_id = lecture_id.upper()
+    existing = (
+        db.query(models.PushSubscription)
+        .filter(models.PushSubscription.endpoint == sub_data.endpoint)
+        .first()
+    )
+    if existing:
+        existing.lecture_id = lecture_id
+        existing.faculty_id = sub_data.faculty_id
+        existing.p256dh = sub_data.keys.p256dh
+        existing.auth = sub_data.keys.auth
+        existing.active = True
+        db.commit()
+        db.refresh(existing)
+        logger.info("[PUSH_SUB] updated subscription_id=%s for lecture=%s", existing.id, lecture_id)
+        return {"status": "updated", "id": existing.id}
+    else:
+        new_sub = models.PushSubscription(
+            lecture_id=lecture_id,
+            faculty_id=sub_data.faculty_id,
+            endpoint=sub_data.endpoint,
+            p256dh=sub_data.keys.p256dh,
+            auth=sub_data.keys.auth,
+            active=True,
+        )
+        db.add(new_sub)
+        db.commit()
+        db.refresh(new_sub)
+        logger.info("[PUSH_SUB] created subscription_id=%s for lecture=%s", new_sub.id, lecture_id)
+        return {"status": "created", "id": new_sub.id}
+
+
+@app.delete("/api/lectures/{lecture_id}/push-subscriptions")
+def delete_push_subscription(
+    lecture_id: str,
+    endpoint: str,
+    db: Session = Depends(get_db),
+):
+    lecture_id = lecture_id.upper()
+    sub = (
+        db.query(models.PushSubscription)
+        .filter(
+            models.PushSubscription.lecture_id == lecture_id,
+            models.PushSubscription.endpoint == endpoint,
+        )
+        .first()
+    )
+    if sub:
+        sub.active = False
+        db.commit()
+        logger.info("[PUSH_SUB] deactivated subscription_id=%s for lecture=%s", sub.id, lecture_id)
+    return {"status": "ok"}
+
+
+@app.post("/api/lectures/{lecture_id}/push-test")
+def test_push_notification(
+    lecture_id: str,
+    background_tasks: BackgroundTasks,
+):
+    lecture_id = lecture_id.upper()
+    test_payload = {
+        "title": "LECTRA Test",
+        "body": "Cross-app Web Push notifications are working.",
+        "tag": f"lectra-test-{lecture_id}-{datetime.datetime.utcnow().timestamp()}",
+        "data": {
+            "lecture_id": lecture_id,
+            "url": f"/faculty/room?lectureId={lecture_id}",
+        },
+    }
+    background_tasks.add_task(send_web_push_sync, lecture_id, test_payload)
+    logger.info("[PUSH_TEST] queued test web push for lecture=%s", lecture_id)
+    return {"status": "queued"}
 
 
 @app.post("/api/lectures/{lecture_id}/end")

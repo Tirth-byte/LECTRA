@@ -20,3 +20,15 @@ class SessionActivity(Base):
     event_type = Column(String) # 'JOIN', 'LEAVE', 'AWAY', 'VIEWING'
     reason = Column(String, nullable=True)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+
+class PushSubscription(Base):
+    __tablename__ = "push_subscriptions"
+    id = Column(Integer, primary_key=True, index=True)
+    lecture_id = Column(String, ForeignKey("lectures.id"), index=True)
+    faculty_id = Column(String, index=True)
+    endpoint = Column(String, unique=True, index=True)
+    p256dh = Column(String)
+    auth = Column(String)
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)

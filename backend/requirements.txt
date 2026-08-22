@@ -6,3 +6,5 @@ sse-starlette==1.8.2
 redis==5.0.1
 livekit-api==0.1.1
 python-dotenv==1.0.0
+pywebpush==2.4.0
+cryptography>=42.0.0

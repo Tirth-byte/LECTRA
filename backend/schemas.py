@@ -42,3 +42,12 @@ class ActivityResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class PushKeys(BaseModel):
+    p256dh: str
+    auth: str
+
+class PushSubscriptionCreate(BaseModel):
+    endpoint: str
+    keys: PushKeys
+    faculty_id: Optional[str] = "faculty"

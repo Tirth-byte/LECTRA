@@ -144,7 +144,72 @@ function FacultyDashboardContent() {
   const lastSystemNotificationRef = useRef<Record<string, { type: string; reason?: string; time: number }>>({});
   const originalTitleRef = useRef<string>("Lectra - Faculty Room");
 
-  // Register service worker on mount for reliable OS notifications
+  // VAPID Public Key helper
+  const urlBase64ToUint8Array = (base64String: string) => {
+    const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/\-/g, "+").replace(/_/g, "/");
+    const rawData = window.atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+    for (let i = 0; i < rawData.length; ++i) {
+      outputArray[i] = rawData.charCodeAt(i);
+    }
+    return outputArray;
+  };
+
+  // Subscribe to Web Push on Backend
+  const subscribeToWebPush = useCallback(async () => {
+    if (typeof window === "undefined" || !("serviceWorker" in navigator) || !("PushManager" in window)) {
+      console.warn("[PUSH] Web Push not supported in this browser");
+      return;
+    }
+
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      
+      const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || "BCWdovh0jjaE521xDcgtCgqW4uxnJ7mklCVKb4-_HNPF3MDeGBxaF0yOsRzN_G_gzwKLWOv6vWJuA2HuggnNhU0";
+      const convertedKey = urlBase64ToUint8Array(vapidPublicKey);
+
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: convertedKey,
+        });
+        console.log("[PUSH] subscription created");
+      } else {
+        console.log("[PUSH] existing subscription found");
+      }
+
+      const subJson = sub.toJSON();
+      if (subJson.endpoint && subJson.keys?.p256dh && subJson.keys?.auth && lectureId) {
+        const payload = {
+          endpoint: subJson.endpoint,
+          keys: {
+            p256dh: subJson.keys.p256dh,
+            auth: subJson.keys.auth,
+          },
+          faculty_id: facultyId || "faculty",
+        };
+
+        const res = await fetch(`${apiUrl}/api/lectures/${lectureId.toUpperCase()}/push-subscriptions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (res.ok) {
+          console.log("[PUSH] subscription sent to backend successfully");
+        } else {
+          console.warn("[PUSH] backend failed to store subscription:", res.status);
+        }
+      }
+    } catch (err) {
+      console.error("[PUSH] Error subscribing to Web Push:", err);
+    }
+  }, [lectureId, facultyId]);
+
+  // Register service worker on mount and sync push subscription
   useEffect(() => {
     if (typeof window !== "undefined") {
       originalTitleRef.current = document.title || "Lectra - Faculty Room";
@@ -160,22 +225,28 @@ function FacultyDashboardContent() {
         navigator.serviceWorker
           .register("/sw.js")
           .then((reg) => {
-            console.log("[SERVICE_WORKER] registered successfully with scope:", reg.scope);
+            console.log("[PUSH] service worker registered with scope:", reg.scope);
+            if (Notification.permission === "granted") {
+              subscribeToWebPush();
+            }
           })
           .catch((err) => {
             console.warn("[SERVICE_WORKER] registration failed:", err);
           });
       }
     }
-  }, []);
+  }, [subscribeToWebPush]);
 
   const requestPermission = async () => {
     if (typeof window !== "undefined" && "Notification" in window) {
       try {
         console.log("[NOTIFICATION] requesting permission from user...");
         const result = await Notification.requestPermission();
-        console.log("[NOTIFICATION] permission result:", result);
+        console.log("[PUSH] permission=", result);
         setNotificationPermission(result);
+        if (result === "granted") {
+          await subscribeToWebPush();
+        }
       } catch (err) {
         console.error("Failed to request permission", err);
       }
@@ -217,23 +288,27 @@ function FacultyDashboardContent() {
     }
   }, []);
 
-  // Helper: Test Native Notification
-  const triggerTestNotification = async () => {
-    console.log("[NOTIFICATION] test button clicked");
-    console.log("[NOTIFICATION] permission:", Notification.permission);
-    console.log("[NOTIFICATION] visibility:", document.visibilityState);
-    console.log("[NOTIFICATION] focused:", document.hasFocus());
-
+  // Helper: Trigger True Server-Side Web Push Test
+  const triggerServerPushTest = async () => {
+    console.log("[PUSH] server push test requested");
     if (Notification.permission !== "granted") {
       await requestPermission();
     }
     
-    await showNativeOSNotification("LECTRA Test", {
-      body: "System notifications are working outside the browser window.",
-      icon: "/favicon.ico",
-      tag: `lectra-test-${Date.now()}`,
-      requireInteraction: false,
-    });
+    // Ensure subscription is sent
+    await subscribeToWebPush();
+
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const res = await fetch(`${apiUrl}/api/lectures/${lectureId.toUpperCase()}/push-test`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        console.log("[PUSH] backend queued server-side web push test");
+      }
+    } catch (err) {
+      console.error("[PUSH] Error triggering server push test:", err);
+    }
   };
 
   // Dispatch Native System Notification (Cross-App when tab is not focused/visible)
@@ -645,26 +720,10 @@ function FacultyDashboardContent() {
 
             <button
               type="button"
-              onClick={triggerTestNotification}
-              className="px-2.5 py-1 text-xs font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition border border-gray-200 dark:border-gray-700"
+              onClick={triggerServerPushTest}
+              className="px-2.5 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 hover:bg-emerald-100 rounded-lg transition border border-emerald-200 dark:border-emerald-800"
             >
-              Test OS Notification
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                const pairUrl = `lectra://connect?lecture=${lectureId.toUpperCase()}&apiUrl=${encodeURIComponent(process.env.NEXT_PUBLIC_API_URL || 'https://lectra-xk3q.onrender.com')}`;
-                window.location.href = pairUrl;
-                navigator.clipboard.writeText(lectureId.toUpperCase()).then(() => {
-                  alert(`Class Code ${lectureId.toUpperCase()} copied! If the desktop companion is installed, it will connect automatically. Otherwise, paste ${lectureId.toUpperCase()} into the LECTRA Companion app.`);
-                }).catch(() => {
-                  alert(`Class Code: ${lectureId.toUpperCase()}`);
-                });
-              }}
-              className="px-2.5 py-1 text-xs font-medium text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 rounded-lg transition border border-blue-200 dark:border-blue-800"
-            >
-              Connect Desktop Alerts
+              Send Test Push
             </button>
           </div>
         </div>
