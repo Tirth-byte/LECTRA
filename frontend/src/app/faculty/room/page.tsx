@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useSearchParams } from "next/navigation";
 import { 
   LiveKitRoom, 
@@ -50,6 +50,7 @@ function FacultyDashboardContent() {
   const [error, setError] = useState("");
   const [students, setStudents] = useState<Record<string, StudentState>>({});
   const [notifications, setNotifications] = useState<StudentEvent[]>([]);
+  const [toastAlerts, setToastAlerts] = useState<Array<StudentEvent & { id: string }>>([]);
   const notificationQueue = useRef<StudentEvent[]>([]);
   const notificationTimer = useRef<any>(null);
   const [sessionEnded, setSessionEnded] = useState(false);
@@ -62,11 +63,40 @@ function FacultyDashboardContent() {
     }
   }, []);
 
+  // Fetch initial participants
+  const fetchParticipants = useCallback(async () => {
+    if (!lectureId) return;
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const res = await fetch(`${apiUrl}/api/lectures/${lectureId.toUpperCase()}/participants`);
+      if (res.ok) {
+        const data = await res.json();
+        const initialMap: Record<string, StudentState> = {};
+        for (const p of data.participants || []) {
+          initialMap[p.id] = {
+            id: p.id,
+            name: p.name,
+            status: p.status,
+            lastUpdate: p.lastUpdate,
+            reason: p.reason,
+            awayStartedAt: p.status === "AWAY" ? Date.now() : undefined,
+          };
+        }
+        setStudents(prev => ({ ...initialMap, ...prev }));
+        console.log(`[FACULTY] loaded ${data.participants?.length || 0} participants for ${lectureId}`);
+      }
+    } catch (err) {
+      console.error("[FACULTY] failed to fetch participants", err);
+    }
+  }, [lectureId]);
+
   useEffect(() => {
     if (!lectureId || !facultyId) return;
+    const normalizedLectureId = lectureId.toUpperCase();
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
     
     // Fetch LiveKit token
-    fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId}/token?faculty_id=${facultyId}`)
+    fetch(`${apiUrl}/api/lectures/${normalizedLectureId}/token?faculty_id=${facultyId}`)
       .then(res => res.json())
       .then(data => {
         if (data.token) setToken(data.token);
@@ -74,47 +104,68 @@ function FacultyDashboardContent() {
       })
       .catch(err => setError(err.message));
 
+    // Initial participant fetch
+    fetchParticipants();
+
     // Connect to SSE for events
-    const eventSource = new EventSource(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId}/events`);
+    const eventSource = new EventSource(`${apiUrl}/api/lectures/${normalizedLectureId}/events`);
     
+    eventSource.onopen = () => {
+      console.log(`[SSE] Connected to event stream for ${normalizedLectureId}`);
+      fetchParticipants();
+    };
+
     eventSource.onmessage = (e) => {
-      const data = JSON.parse(e.data);
-      if (data.type === "PING" || data.type === "STATUS_CHANGE") return;
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === "PING" || data.type === "STATUS_CHANGE") return;
 
-      const event = data as StudentEvent;
-      
-      setStudents(prev => {
-        const prevState = prev[event.student_id];
-        let awayStartedAt = prevState?.awayStartedAt;
-        
-        if (event.type === "AWAY" && prevState?.status !== "AWAY") {
-           awayStartedAt = Date.now();
-        } else if (event.type === "VIEWING" && prevState?.status === "AWAY") {
-           const durationStr = awayStartedAt ? ` (Away for ${((Date.now() - awayStartedAt) / 1000).toFixed(1)}s)` : '';
-           event.durationStr = durationStr;
-           awayStartedAt = undefined;
-        } else if (event.type === "VIEWING" || event.type === "DISCONNECTED") {
-           awayStartedAt = undefined;
-        }
+        const event = data as StudentEvent;
+        console.log(`[SSE] faculty subscriber received ${event.type} for ${event.student_name}`);
 
-        return {
-          ...prev,
-          [event.student_id]: {
-            id: event.student_id,
-            name: event.student_name,
-            status: event.type as any,
-            lastUpdate: event.timestamp,
-            awayStartedAt,
-            reason: event.reason
+        setStudents(prev => {
+          const prevState = prev[event.student_id];
+          let awayStartedAt = prevState?.awayStartedAt;
+          
+          if (event.type === "AWAY" && prevState?.status !== "AWAY") {
+             awayStartedAt = Date.now();
+          } else if (["VIEWING", "JOIN", "RECONNECTED"].includes(event.type) && prevState?.status === "AWAY") {
+             const durationStr = awayStartedAt ? ` (Away for ${((Date.now() - awayStartedAt) / 1000).toFixed(1)}s)` : '';
+             event.durationStr = durationStr;
+             awayStartedAt = undefined;
+          } else if (["VIEWING", "JOIN", "RECONNECTED", "DISCONNECTED"].includes(event.type)) {
+             awayStartedAt = undefined;
           }
-        };
-      });
 
-      // Add elegant notification
-      if (["AWAY", "LEAVE", "DISCONNECTED"].includes(event.type) || (event.type === "VIEWING" && event.durationStr)) {
-        setNotifications(prev => [event, ...prev].slice(0, 5));
+          console.log(`[FACULTY] participant updated: ${event.student_name} -> ${event.type}`);
+
+          return {
+            ...prev,
+            [event.student_id]: {
+              id: event.student_id,
+              name: event.student_name,
+              status: event.type as any,
+              lastUpdate: event.timestamp,
+              awayStartedAt,
+              reason: event.reason
+            }
+          };
+        });
+
+        // Trigger Right-Side Floating Toast Alert
+        const alertId = `${event.student_id}-${Date.now()}-${Math.random()}`;
+        const toastItem = { ...event, id: alertId };
+        setToastAlerts(prev => [toastItem, ...prev].slice(0, 4));
+
+        // Auto remove toast after 5s
+        setTimeout(() => {
+          setToastAlerts(prev => prev.filter(t => t.id !== alertId));
+        }, 5000);
+
+        // Add to persistent recent activity feed
+        setNotifications(prev => [event, ...prev].slice(0, 10));
         
-        // System Notification grouping
+        // System Notification grouping for backgrounded faculty tab
         if ("Notification" in window && Notification.permission === "granted" && document.hidden) {
           notificationQueue.current.push(event);
           if (notificationTimer.current) clearTimeout(notificationTimer.current);
@@ -123,7 +174,8 @@ function FacultyDashboardContent() {
             const queue = notificationQueue.current;
             if (queue.length === 1) {
               const action = queue[0].type === "AWAY" ? "left lecture view" : 
-                             queue[0].type === "VIEWING" ? `returned` : "disconnected";
+                             queue[0].type === "VIEWING" ? `returned` :
+                             queue[0].type === "JOIN" ? "joined the lecture" : "disconnected";
               new Notification(`${queue[0].student_name} ${action}`, {
                 body: `${queue[0].durationStr || 'just now'}`,
                 icon: "/favicon.ico"
@@ -137,23 +189,29 @@ function FacultyDashboardContent() {
             notificationQueue.current = [];
           }, 1500);
         }
+        
+        if (event.type === "END") {
+          setSessionEnded(true);
+        }
+      } catch (err) {
+        console.error("[SSE] error parsing message", err);
       }
-      
-      if (event.type === "END") {
-        setSessionEnded(true);
-      }
+    };
+
+    eventSource.onerror = (err) => {
+      console.warn("[SSE] EventSource connection error, will auto-reconnect", err);
     };
 
     return () => {
       eventSource.close();
     };
-  }, [lectureId, facultyId]);
+  }, [lectureId, facultyId, fetchParticipants]);
 
   const endLecture = async () => {
     if (!confirm("Are you sure you want to end this lecture?")) return;
     
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId}/end`, {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId.toUpperCase()}/end`, {
         method: "POST"
       });
       if (res.ok) {
@@ -203,14 +261,72 @@ function FacultyDashboardContent() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-[#0a0a0a] flex flex-col">
+    <div className="min-h-screen bg-gray-50 dark:bg-[#0a0a0a] flex flex-col relative">
+      {/* Right Side Floating Notifications Stack */}
+      <div className="fixed top-20 right-6 z-50 flex flex-col space-y-3 pointer-events-none max-w-sm w-full">
+        {toastAlerts.map(toast => (
+          <div
+            key={toast.id}
+            className={`pointer-events-auto p-4 rounded-2xl shadow-xl border backdrop-blur-md transition-all duration-300 transform translate-x-0 ${
+              toast.type === "AWAY"
+                ? "bg-amber-500/15 dark:bg-amber-950/60 border-amber-500/30 text-amber-900 dark:text-amber-100"
+                : toast.type === "VIEWING"
+                ? "bg-emerald-500/15 dark:bg-emerald-950/60 border-emerald-500/30 text-emerald-900 dark:text-emerald-100"
+                : toast.type === "JOIN"
+                ? "bg-blue-500/15 dark:bg-blue-950/60 border-blue-500/30 text-blue-900 dark:text-blue-100"
+                : "bg-red-500/15 dark:bg-red-950/60 border-red-500/30 text-red-900 dark:text-red-100"
+            }`}
+          >
+            <div className="flex items-start space-x-3">
+              <div className="mt-0.5">
+                {toast.type === "AWAY" ? (
+                  <EyeOff className="w-5 h-5 text-amber-500" />
+                ) : toast.type === "VIEWING" ? (
+                  <UserCheck className="w-5 h-5 text-emerald-500" />
+                ) : toast.type === "JOIN" ? (
+                  <Users className="w-5 h-5 text-blue-500" />
+                ) : (
+                  <AlertCircle className="w-5 h-5 text-red-500" />
+                )}
+              </div>
+              <div className="flex-1">
+                <p className="font-semibold text-sm">
+                  {toast.type === "AWAY" ? (
+                    `⚠ ${toast.student_name} left the lecture`
+                  ) : toast.type === "VIEWING" ? (
+                    `✓ ${toast.student_name} returned to lecture`
+                  ) : toast.type === "JOIN" ? (
+                    `● ${toast.student_name} joined`
+                  ) : (
+                    `✕ ${toast.student_name} disconnected`
+                  )}
+                </p>
+                <p className="text-xs opacity-80 mt-0.5">
+                  {toast.type === "AWAY"
+                    ? toast.reason === "PAGE_HIDDEN"
+                      ? "Switched browser tab or minimized"
+                      : toast.reason === "WINDOW_BLURRED"
+                      ? "Changed application window"
+                      : toast.reason === "FULLSCREEN_EXITED"
+                      ? "Exited fullscreen mode"
+                      : "Student switched away"
+                    : toast.durationStr
+                    ? `Returned after ${toast.durationStr.replace(/[()]/g, "")}`
+                    : "Just now"}
+                </p>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
       <header className="bg-white dark:bg-[#121212] border-b border-gray-200 dark:border-gray-800 px-6 py-4 flex items-center justify-between sticky top-0 z-10">
         <div>
           <h1 className="text-xl font-semibold text-gray-900 dark:text-white">Active Lecture</h1>
           <div className="flex items-center space-x-2 mt-1">
             <span className="text-sm text-gray-500 dark:text-gray-400">Class Code:</span>
             <span className="px-2 py-1 bg-gray-100 dark:bg-[#2a2a2a] rounded font-mono text-sm font-bold tracking-wider text-gray-900 dark:text-gray-100">
-              {lectureId}
+              {lectureId.toUpperCase()}
             </span>
           </div>
         </div>
@@ -235,7 +351,7 @@ function FacultyDashboardContent() {
             onDisconnected={() => console.error("LiveKitRoom disconnected")}
             onError={(error) => console.error("LiveKitRoom error:", error)}
           >
-            <BroadcastControl lectureId={lectureId} />
+            <BroadcastControl lectureId={lectureId.toUpperCase()} />
             <RoomAudioRenderer />
           </LiveKitRoom>
         </div>
@@ -249,14 +365,14 @@ function FacultyDashboardContent() {
                 <span>Class Presence</span>
               </h2>
               <span className="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 text-xs font-bold px-2.5 py-1 rounded-full">
-                {Object.values(students).filter(s => ["JOIN", "VISIBLE"].includes(s.status)).length} Active
+                {Object.values(students).filter(s => ["JOIN", "VIEWING", "RECONNECTED"].includes(s.status)).length} Active
               </span>
             </div>
 
             <div className="space-y-4">
               {Object.values(students).length === 0 ? (
                 <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
-                  Waiting for students to join using code {lectureId}
+                  Waiting for students to join using code {lectureId.toUpperCase()}
                 </p>
               ) : (
                 <div className="space-y-3">
@@ -266,7 +382,7 @@ function FacultyDashboardContent() {
                       {["JOIN", "VIEWING", "RECONNECTED"].includes(s.status) && (
                         <div className="flex items-center text-emerald-600 dark:text-emerald-400 text-xs font-medium space-x-1">
                           <UserCheck className="w-4 h-4" />
-                          <span>Viewing</span>
+                          <span>Watching</span>
                         </div>
                       )}
                       {s.status === "AWAY" && (
@@ -294,18 +410,20 @@ function FacultyDashboardContent() {
             </div>
           </div>
           
-          {/* Recent Activity Subtle Notifications */}
+          {/* Recent Activity Persistent Log */}
           {notifications.length > 0 && (
             <div className="bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-gray-800 rounded-2xl p-6 shadow-sm">
               <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wider">Recent Activity</h3>
               <div className="space-y-3">
                 {notifications.map((n, idx) => (
                   <div key={idx} className="flex items-start space-x-3 text-sm">
-                    <div className={`mt-0.5 w-2 h-2 rounded-full ${n.type === 'AWAY' ? 'bg-amber-500' : n.type === 'VIEWING' ? 'bg-emerald-500' : 'bg-gray-400'}`} />
+                    <div className={`mt-0.5 w-2 h-2 rounded-full ${n.type === 'AWAY' ? 'bg-amber-500' : ['VIEWING', 'RECONNECTED'].includes(n.type) ? 'bg-emerald-500' : n.type === 'JOIN' ? 'bg-blue-500' : 'bg-gray-400'}`} />
                     <p className="text-gray-600 dark:text-gray-300">
                       <span className="font-semibold text-gray-900 dark:text-white">{n.student_name}</span>{" "}
                       {n.type === "AWAY" ? "left lecture view" : 
-                       n.type === "VIEWING" ? `returned${n.durationStr}` : 
+                       n.type === "VIEWING" ? `returned${n.durationStr || ''}` : 
+                       n.type === "JOIN" ? "joined the lecture" :
+                       n.type === "RECONNECTED" ? "reconnected" :
                        n.type === "DISCONNECTED" ? "disconnected" : 
                        "left the lecture"}
                     </p>

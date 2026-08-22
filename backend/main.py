@@ -177,17 +177,19 @@ def save_activity_bg(
 
 @app.post("/api/lectures", response_model=schemas.LectureResponse)
 def create_lecture(lecture: schemas.LectureCreate, db: Session = Depends(get_db)):
-    lecture_id = generate_short_code()
+    lecture_id = generate_short_code().upper()
     faculty_id = str(uuid.uuid4())
     db_lecture = models.Lecture(id=lecture_id, faculty_id=faculty_id, title=lecture.title)
     db.add(db_lecture)
     db.commit()
     db.refresh(db_lecture)
+    logger.info("[LECTURE_CREATED] id=%s title=%s faculty_id=%s", lecture_id, lecture.title, faculty_id)
     return db_lecture
 
 
 @app.get("/api/lectures/{lecture_id}/token")
 def get_faculty_token(lecture_id: str, faculty_id: str, db: Session = Depends(get_db)):
+    lecture_id = lecture_id.upper()
     db_lecture = db.query(models.Lecture).filter(models.Lecture.id == lecture_id).first()
     if not db_lecture or db_lecture.faculty_id != faculty_id:
         raise HTTPException(status_code=404, detail="Lecture not found or unauthorized")
@@ -204,6 +206,50 @@ def get_faculty_token(lecture_id: str, faculty_id: str, db: Session = Depends(ge
     return {"token": access_token.to_jwt()}
 
 
+@app.get("/api/lectures/{lecture_id}/participants")
+async def get_participants(lecture_id: str, db: Session = Depends(get_db)):
+    """Fetch current participants and their latest known presence state for the lecture."""
+    lecture_id = lecture_id.upper()
+    active_memory = heartbeats.get(lecture_id, {})
+    now = datetime.datetime.utcnow().timestamp()
+
+    # Build response prioritizing active in-memory state, falling back to database
+    participants_map = {}
+
+    # 1. Load from DB session_activity
+    def query_db_activities():
+        return (
+            db.query(models.SessionActivity)
+            .filter(models.SessionActivity.lecture_id == lecture_id)
+            .order_by(models.SessionActivity.timestamp.asc())
+            .all()
+        )
+
+    activities = await run_in_threadpool(query_db_activities)
+    for act in activities:
+        participants_map[act.student_id] = {
+            "id": act.student_id,
+            "name": act.student_name,
+            "status": act.event_type,
+            "lastUpdate": act.timestamp.isoformat() if act.timestamp else datetime.datetime.utcnow().isoformat(),
+            "reason": act.reason,
+        }
+
+    # 2. Merge with latest in-memory heartbeat / presence state
+    for student_id, data in active_memory.items():
+        is_disconnected = data.get("disconnected") or (now - data.get("last_seen", 0) > 12)
+        status = "DISCONNECTED" if is_disconnected else data.get("state", "VIEWING")
+        participants_map[student_id] = {
+            "id": student_id,
+            "name": data.get("name", "Student"),
+            "status": status,
+            "lastUpdate": datetime.datetime.fromtimestamp(data.get("last_seen", now)).isoformat(),
+            "reason": data.get("reason"),
+        }
+
+    return {"lecture_id": lecture_id, "participants": list(participants_map.values())}
+
+
 @app.post("/api/lectures/{lecture_id}/join", response_model=schemas.JoinResponse)
 async def join_lecture(
     lecture_id: str,
@@ -211,6 +257,9 @@ async def join_lecture(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
+    lecture_id = lecture_id.upper()
+    student_name = student.name.strip()
+
     def check_lecture():
         return (
             db.query(models.Lecture)
@@ -226,26 +275,29 @@ async def join_lecture(
     student_id = str(uuid.uuid4())
     grant = VideoGrants(room=lecture_id, room_join=True, can_publish=False, can_subscribe=True)
     access_token = AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
-    access_token.with_identity(f"student-{student_id}").with_name(student.name).with_grants(grant)
+    access_token.with_identity(f"student-{student_id}").with_name(student_name).with_grants(grant)
 
     if lecture_id not in heartbeats:
         heartbeats[lecture_id] = {}
     heartbeats[lecture_id][student_id] = {
-        "name": student.name,
+        "name": student_name,
         "last_seen": datetime.datetime.utcnow().timestamp(),
         "disconnected": False,
-        "state": "JOIN",
+        "state": "VIEWING",
     }
 
-    background_tasks.add_task(save_activity_bg, lecture_id, student_id, student.name, "JOIN")
+    background_tasks.add_task(save_activity_bg, lecture_id, student_id, student_name, "JOIN")
 
     now_iso = datetime.datetime.utcnow().isoformat()
+    logger.info("[JOIN] %s (student_id=%s) joined %s", student_name, student_id, lecture_id)
+
     event_data = {
         "type": "JOIN",
         "student_id": student_id,
-        "student_name": student.name,
+        "student_name": student_name,
         "timestamp": now_iso,
     }
+    logger.info("[REDIS] publishing student_joined event for %s on %s", student_name, lecture_id)
     await publish_lecture_event(lecture_id, event_data)
 
     return {
@@ -262,6 +314,7 @@ async def handle_heartbeat(
     payload: schemas.HeartbeatPayload,
     db: Session = Depends(get_db),
 ):
+    lecture_id = lecture_id.upper()
     if lecture_id not in heartbeats:
         heartbeats[lecture_id] = {}
 
@@ -284,14 +337,15 @@ async def handle_heartbeat(
             return last.student_name if last else "Unknown"
 
         student_name = await run_in_threadpool(get_name)
-        student_data = {"name": student_name, "disconnected": False, "state": payload.state}
+        student_data = {"name": student_name, "disconnected": False, "state": payload.state.upper()}
 
     was_disconnected = student_data.get("disconnected", False)
     student_data["last_seen"] = now
     student_data["disconnected"] = False
-    student_data["state"] = payload.state
+    student_data["state"] = payload.state.upper()
 
     if was_disconnected:
+        logger.info("[RECONNECTED] student=%s (id=%s) session=%s", student_data["name"], student_id, lecture_id)
         event_data_recon = {
             "type": "RECONNECTED",
             "student_id": student_id,
@@ -301,7 +355,7 @@ async def handle_heartbeat(
         await publish_lecture_event(lecture_id, event_data_recon)
 
         event_data_state = {
-            "type": payload.state,
+            "type": payload.state.upper(),
             "student_id": student_id,
             "student_name": student_data["name"],
             "timestamp": now_iso,
@@ -320,13 +374,22 @@ async def update_presence(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
+    lecture_id = lecture_id.upper()
+    event_type = event.event_type.upper()
     student_data = heartbeats.get(lecture_id, {}).get(student_id)
 
     if student_data:
         student_name = student_data.get("name", "Unknown")
-        if student_data.get("state") == event.event_type.upper():
+        if (
+            student_data.get("state") == event_type
+            and student_data.get("reason") == event.reason
+            and not student_data.get("disconnected")
+        ):
             return {"status": "ignored_duplicate"}
-        student_data["state"] = event.event_type.upper()
+        student_data["state"] = event_type
+        student_data["last_seen"] = datetime.datetime.utcnow().timestamp()
+        student_data["disconnected"] = False
+        student_data["reason"] = event.reason
     else:
 
         def get_name():
@@ -348,7 +411,8 @@ async def update_presence(
             "name": student_name,
             "last_seen": datetime.datetime.utcnow().timestamp(),
             "disconnected": False,
-            "state": event.event_type.upper(),
+            "state": event_type,
+            "reason": event.reason,
         }
 
     background_tasks.add_task(
@@ -356,26 +420,28 @@ async def update_presence(
         lecture_id,
         student_id,
         student_name,
-        event.event_type.upper(),
+        event_type,
         event.reason,
     )
 
     now_iso = datetime.datetime.utcnow().isoformat()
     logger.info(
-        "[PRESENCE] student=%s session=%s -> %s reason=%s",
+        "[PRESENCE] student=%s (id=%s) session=%s -> %s reason=%s",
         student_name,
+        student_id,
         lecture_id,
-        event.event_type.upper(),
+        event_type,
         event.reason,
     )
 
     event_data = {
-        "type": event.event_type.upper(),
+        "type": event_type,
         "student_id": student_id,
         "student_name": student_name,
         "timestamp": now_iso,
         "reason": event.reason,
     }
+    logger.info("[REDIS] publishing presence event %s for %s on %s", event_type, student_name, lecture_id)
     await publish_lecture_event(lecture_id, event_data)
 
     return {"status": "ok"}
@@ -383,6 +449,7 @@ async def update_presence(
 
 @app.post("/api/lectures/{lecture_id}/end")
 async def end_lecture(lecture_id: str, db: Session = Depends(get_db)):
+    lecture_id = lecture_id.upper()
     def do_end():
         db_lecture = db.query(models.Lecture).filter(models.Lecture.id == lecture_id).first()
         if not db_lecture:
@@ -422,6 +489,7 @@ async def end_lecture(lecture_id: str, db: Session = Depends(get_db)):
 async def update_status(
     lecture_id: str, data: schemas.StatusUpdate, db: Session = Depends(get_db)
 ):
+    lecture_id = lecture_id.upper()
     def do_update():
         db_lecture = db.query(models.Lecture).filter(models.Lecture.id == lecture_id).first()
         if not db_lecture:
@@ -447,6 +515,7 @@ async def update_status(
 
 @app.get("/api/lectures/{lecture_id}/events")
 async def lecture_events(lecture_id: str, req: Request):
+    lecture_id = lecture_id.upper()
     channel = f"lecture_events_{lecture_id}"
 
     async def event_generator():

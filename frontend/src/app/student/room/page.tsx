@@ -22,37 +22,54 @@ function StudentViewerContent() {
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const actualStateRef = useRef<"VIEWING" | "AWAY" | null>(null);
+  const lastReportedReasonRef = useRef<string | undefined>(undefined);
+  const blurTimeoutRef = useRef<any>(null);
   
   const reportPresence = useCallback(async (eventType: "VIEWING" | "AWAY" | "LEAVE", reason?: string) => {
     if (!lectureId || !studentId) return;
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      await fetch(`${apiUrl}/api/lectures/${lectureId}/presence?student_id=${studentId}`, {
+      console.log(`[STUDENT] reporting presence: ${eventType} (reason=${reason}) for session ${lectureId}`);
+      await fetch(`${apiUrl}/api/lectures/${lectureId.toUpperCase()}/presence?student_id=${studentId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ event_type: eventType, reason: reason })
       });
     } catch (e) {
-      console.error("Failed to report presence", e);
+      console.error("[STUDENT] failed to report presence", e);
     }
   }, [lectureId, studentId]);
 
   const calculatePresence = useCallback(() => {
-    const visible = document.visibilityState === "visible";
-    const focused = document.hasFocus();
-    const fullscreen = !!document.fullscreenElement;
+    const isHidden = document.visibilityState === "hidden";
+    const isBlurred = !document.hasFocus();
+    const hasFullscreen = !!document.fullscreenElement;
 
-    if (!visible) return { state: "AWAY" as const, reason: "PAGE_HIDDEN" };
-    if (!focused) return { state: "AWAY" as const, reason: "WINDOW_BLURRED" };
-    if (!fullscreen) return { state: "AWAY" as const, reason: "FULLSCREEN_EXITED" };
+    // Primary signal: visibilityState
+    if (isHidden) {
+      return { state: "AWAY" as const, reason: "PAGE_HIDDEN" };
+    }
+
+    // Fullscreen exit detection
+    if (!hasFullscreen) {
+      return { state: "AWAY" as const, reason: "FULLSCREEN_EXITED" };
+    }
+
+    // Secondary signal: window blur (e.g. alt-tab or another application taking focus)
+    if (isBlurred) {
+      return { state: "AWAY" as const, reason: "WINDOW_BLURRED" };
+    }
     
     return { state: "VIEWING" as const, reason: undefined };
   }, []);
 
   const updatePresence = useCallback(() => {
     const { state, reason } = calculatePresence();
-    if (actualStateRef.current !== state) {
+    
+    // Deduplicate state changes to prevent spamming
+    if (actualStateRef.current !== state || (state === "AWAY" && lastReportedReasonRef.current !== reason)) {
       actualStateRef.current = state;
+      lastReportedReasonRef.current = reason;
       reportPresence(state, reason);
     }
   }, [calculatePresence, reportPresence]);
@@ -61,28 +78,49 @@ function StudentViewerContent() {
 
   useEffect(() => {
     // SSE for status updates
+    const normalizedLectureId = (lectureId || "").toUpperCase();
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    const eventSource = new EventSource(`${apiUrl}/api/lectures/${lectureId}/events`);
+    const eventSource = new EventSource(`${apiUrl}/api/lectures/${normalizedLectureId}/events`);
     
     eventSource.onmessage = (e) => {
-      const data = JSON.parse(e.data);
-      if (data.type === "STATUS_CHANGE") {
-        setSessionStatus(data.status);
-      } else if (data.type === "END") {
-        setSessionStatus("ENDED");
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === "STATUS_CHANGE") {
+          setSessionStatus(data.status);
+        } else if (data.type === "END") {
+          setSessionStatus("ENDED");
+        }
+      } catch (err) {
+        console.error("[STUDENT_SSE] error parsing message", err);
       }
     };
 
-    const handleVisibilityChange = updatePresence;
+    const handleVisibilityChange = () => {
+      console.log(`[STUDENT] visibilitychange: state=${document.visibilityState}`);
+      updatePresence();
+    };
     
     const handleBlur = () => {
-      setTimeout(updatePresence, 200);
+      // Small debounce so clicking internal controls / video elements doesn't trigger false away
+      if (blurTimeoutRef.current) clearTimeout(blurTimeoutRef.current);
+      blurTimeoutRef.current = setTimeout(() => {
+        if (!document.hasFocus() || document.visibilityState === "hidden") {
+          console.log("[STUDENT] blur detected -> window not focused");
+          updatePresence();
+        }
+      }, 300);
     };
 
-    const handleFocus = updatePresence;
+    const handleFocus = () => {
+      if (blurTimeoutRef.current) clearTimeout(blurTimeoutRef.current);
+      console.log("[STUDENT] focus restored");
+      updatePresence();
+    };
 
     const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
+      const inFullscreen = !!document.fullscreenElement;
+      setIsFullscreen(inFullscreen);
+      console.log(`[STUDENT] fullscreenchange: inFullscreen=${inFullscreen}`);
       updatePresence();
     };
 
@@ -91,14 +129,14 @@ function StudentViewerContent() {
     window.addEventListener("focus", handleFocus);
     document.addEventListener("fullscreenchange", handleFullscreenChange);
 
-    // Initial check (delay a bit)
-    setTimeout(updatePresence, 500);
+    // Initial check (delay slightly for DOM ready)
+    const initialTimer = setTimeout(updatePresence, 500);
 
-    // Heartbeat
+    // Heartbeat to keep connection and state alive in Redis & DB
     const heartbeatInterval = setInterval(() => {
-      const state = actualStateRef.current || "AWAY";
+      const state = actualStateRef.current || "VIEWING";
       if (!lectureId || !studentId) return;
-      fetch(`${apiUrl}/api/lectures/${lectureId}/heartbeat?student_id=${studentId}`, {
+      fetch(`${apiUrl}/api/lectures/${normalizedLectureId}/heartbeat?student_id=${studentId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ state })
@@ -107,13 +145,15 @@ function StudentViewerContent() {
 
     return () => {
       eventSource.close();
+      if (blurTimeoutRef.current) clearTimeout(blurTimeoutRef.current);
+      clearTimeout(initialTimer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("blur", handleBlur);
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
       clearInterval(heartbeatInterval);
       
-      fetch(`${apiUrl}/api/lectures/${lectureId}/presence?student_id=${studentId}`, {
+      fetch(`${apiUrl}/api/lectures/${normalizedLectureId}/presence?student_id=${studentId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ event_type: "LEAVE" }),
