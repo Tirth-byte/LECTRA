@@ -187,6 +187,15 @@ def create_lecture(lecture: schemas.LectureCreate, db: Session = Depends(get_db)
     return db_lecture
 
 
+@app.get("/api/lectures/{lecture_id}", response_model=schemas.LectureResponse)
+def get_lecture(lecture_id: str, db: Session = Depends(get_db)):
+    lecture_id = lecture_id.upper()
+    db_lecture = db.query(models.Lecture).filter(models.Lecture.id == lecture_id).first()
+    if not db_lecture:
+        raise HTTPException(status_code=404, detail="Lecture not found")
+    return db_lecture
+
+
 @app.get("/api/lectures/{lecture_id}/token")
 def get_faculty_token(lecture_id: str, faculty_id: str, db: Session = Depends(get_db)):
     lecture_id = lecture_id.upper()

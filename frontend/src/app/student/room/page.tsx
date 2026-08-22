@@ -78,25 +78,62 @@ function StudentViewerContent() {
   const [sessionStatus, setSessionStatus] = useState("WAITING");
   const isEnded = sessionStatus === "ENDED";
 
+  // Fetch initial lecture status and keep in sync via SSE
   useEffect(() => {
-    if (isEnded) return;
-
-    // SSE for status updates
-    const normalizedLectureId = (lectureId || "").toUpperCase();
+    if (!lectureId || isEnded) return;
+    const normalizedLectureId = lectureId.toUpperCase();
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+    // 1. Initial status fetch
+    fetch(`${apiUrl}/api/lectures/${normalizedLectureId}`)
+      .then(res => res.json())
+      .then(data => {
+        console.log(`[STUDENT] Initial lecture status: ${data.status}`);
+        if (data.status === "ENDED") {
+          setSessionStatus("ENDED");
+          if (document.fullscreenElement && document.exitFullscreen) {
+            document.exitFullscreen().catch(() => {});
+          }
+        } else if (data.status) {
+          setSessionStatus(data.status);
+        }
+      })
+      .catch(err => console.warn("[STUDENT] Failed to fetch initial status:", err));
+
+    // 2. Status polling backup every 4 seconds
+    const statusPoll = setInterval(() => {
+      fetch(`${apiUrl}/api/lectures/${normalizedLectureId}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.status === "ENDED") {
+            setSessionStatus("ENDED");
+            if (document.fullscreenElement && document.exitFullscreen) {
+              document.exitFullscreen().catch(() => {});
+            }
+          } else if (data.status) {
+            setSessionStatus(data.status);
+          }
+        })
+        .catch(() => {});
+    }, 4000);
+
+    // 3. Connect to SSE
+    console.log(`[STUDENT_SSE] connecting to ${apiUrl}/api/lectures/${normalizedLectureId}/events`);
     const eventSource = new EventSource(`${apiUrl}/api/lectures/${normalizedLectureId}/events`);
     
     eventSource.onopen = () => {
-      console.log(`[STUDENT_SSE] Connected to event stream for ${normalizedLectureId}`);
+      console.log(`[STUDENT_SSE] connected to event stream for ${normalizedLectureId}`);
     };
 
     eventSource.onmessage = (e) => {
       try {
+        console.log(`[STUDENT_SSE] raw event:`, e.data);
         const data = JSON.parse(e.data);
         if (data.type === "STATUS_CHANGE") {
+          console.log(`[STUDENT_SSE] parsed STATUS_CHANGE -> ${data.status}`);
           setSessionStatus(data.status);
         } else if (data.type === "LECTURE_ENDED" || data.type === "END") {
-          console.log("[STUDENT_SSE] Received class ended event");
+          console.log("[STUDENT_SSE] parsed type=LECTURE_ENDED");
           setSessionStatus("ENDED");
           if (document.fullscreenElement && document.exitFullscreen) {
             document.exitFullscreen().catch(() => {});
@@ -108,8 +145,20 @@ function StudentViewerContent() {
     };
 
     eventSource.onerror = (err) => {
-      console.warn("[STUDENT_SSE] EventSource error", err);
+      console.warn("[STUDENT_SSE] EventSource error, will auto-reconnect", err);
     };
+
+    return () => {
+      eventSource.close();
+      clearInterval(statusPoll);
+    };
+  }, [lectureId, isEnded]);
+
+  // Presence and Heartbeat Lifecycle
+  useEffect(() => {
+    if (!lectureId || !studentId || isEnded) return;
+    const normalizedLectureId = lectureId.toUpperCase();
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
     const handleVisibilityChange = () => {
       console.log(`[STUDENT] visibilitychange: state=${document.visibilityState}`);
@@ -144,13 +193,10 @@ function StudentViewerContent() {
     window.addEventListener("focus", handleFocus);
     document.addEventListener("fullscreenchange", handleFullscreenChange);
 
-    // Initial check
     const initialTimer = setTimeout(updatePresence, 500);
 
-    // Heartbeat
     const heartbeatInterval = setInterval(() => {
       const state = actualStateRef.current || "VIEWING";
-      if (!lectureId || !studentId) return;
       fetch(`${apiUrl}/api/lectures/${normalizedLectureId}/heartbeat?student_id=${studentId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -159,7 +205,6 @@ function StudentViewerContent() {
     }, 3000);
 
     return () => {
-      eventSource.close();
       if (blurTimeoutRef.current) clearTimeout(blurTimeoutRef.current);
       clearTimeout(initialTimer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
@@ -175,7 +220,7 @@ function StudentViewerContent() {
         keepalive: true
       }).catch(() => {});
     };
-  }, [updatePresence, lectureId, studentId, isEnded]);
+  }, [lectureId, studentId, isEnded, updatePresence]);
 
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
@@ -266,8 +311,15 @@ export default function StudentViewer() {
 
 function ScreenViewer({ status }: { status: string }) {
   const tracks = useTracks([Track.Source.ScreenShare, Track.Source.ScreenShareAudio]);
-  const videoTrack = tracks.find((t) => t.source === Track.Source.ScreenShare && t.publication.kind === "video");
+  const videoTrack = tracks.find((t) => (t.source === Track.Source.ScreenShare || t.publication?.source === Track.Source.ScreenShare) && t.publication?.kind === "video");
   const connectionState = useConnectionState();
+
+  useEffect(() => {
+    console.log(`[STUDENT SCREEN] useTracks update. Total tracks: ${tracks.length}, videoTrack found:`, Boolean(videoTrack));
+    tracks.forEach((t, i) => {
+      console.log(`[STUDENT SCREEN] track[${i}]: source=${t.source}, kind=${t.publication?.kind}, sid=${t.publication?.trackSid}, isSubscribed=${t.publication?.isSubscribed}`);
+    });
+  }, [tracks, videoTrack]);
 
   if (connectionState === ConnectionState.Disconnected) {
     return (
@@ -287,7 +339,7 @@ function ScreenViewer({ status }: { status: string }) {
     );
   }
 
-  if (status === "WAITING" || !videoTrack) {
+  if (!videoTrack) {
     return (
       <div className="flex flex-col items-center justify-center space-y-4 text-gray-500">
         <MonitorPlay className="w-16 h-16 opacity-50 animate-pulse" />

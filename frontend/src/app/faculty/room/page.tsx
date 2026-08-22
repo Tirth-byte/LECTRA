@@ -8,7 +8,7 @@ import {
   useLocalParticipant,
   useConnectionState
 } from "@livekit/components-react";
-import { LocalVideoTrack, createLocalScreenTracks, ConnectionState } from "livekit-client";
+import { Track, LocalVideoTrack, createLocalScreenTracks, ConnectionState } from "livekit-client";
 import { Users, MonitorUp, StopCircle, EyeOff, UserCheck, AlertCircle, Bell, BellOff, ArrowRight, Loader2 } from "lucide-react";
 
 type StudentEvent = {
@@ -714,26 +714,46 @@ function BroadcastControl({ lectureId }: { lectureId: string }) {
 
   const startScreenShare = async () => {
     if (shareState !== "IDLE" || connectionState !== ConnectionState.Connected || !localParticipant) {
+      console.warn("[FACULTY SCREEN] cannot start share: state=", shareState, "conn=", connectionState);
       return;
     }
     
     setShareState("STARTING");
     setShareError(null);
+    console.log("[FACULTY SCREEN] share requested by faculty");
 
     try {
-      const tracks = await createLocalScreenTracks({
+      console.log("[FACULTY SCREEN] calling setScreenShareEnabled(true)...");
+      const publication = await localParticipant.setScreenShareEnabled(true, {
         audio: false,
-        video: true
+        selfBrowserSurface: "include",
+        surfaceSwitching: "include",
       });
-      
-      const track = tracks.find(t => t.kind === 'video') as LocalVideoTrack;
-      if (!track) {
-        throw new Error("No video track captured");
-      }
 
-      await localParticipant.publishTrack(track);
-      setScreenTrack(track);
-      setShareState("SHARING");
+      console.log("[FACULTY SCREEN] setScreenShareEnabled completed:", publication);
+      
+      // Look up the published screen-share track
+      const screenPub = localParticipant.getTrackPublication(Track.Source.ScreenShare);
+      const track = (screenPub?.track || publication?.track) as LocalVideoTrack | undefined;
+
+      if (track) {
+        console.log("[FACULTY SCREEN] track created and verified:", {
+          trackSid: track.sid,
+          source: track.source,
+          kind: track.kind
+        });
+        setScreenTrack(track);
+        setShareState("SHARING");
+
+        // Handle native browser stop button
+        track.on("ended", () => {
+          console.log("[FACULTY SCREEN] native track ended event");
+          stopScreenShare();
+        });
+      } else {
+        console.log("[FACULTY SCREEN] screen share enabled, waiting for track publication...");
+        setShareState("SHARING");
+      }
 
       // Notify backend of LIVE status
       fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId}/status`, {
@@ -742,12 +762,8 @@ function BroadcastControl({ lectureId }: { lectureId: string }) {
         body: JSON.stringify({ status: "LIVE" })
       }).catch(console.error);
 
-      // Handle native browser stop button (e.g. Chrome's "Stop sharing" bar)
-      track.on('ended', () => {
-        stopScreenShare();
-      });
     } catch (e: any) {
-      console.error("[BROADCAST] Could not start screen share:", e);
+      console.error("[FACULTY SCREEN] Could not start screen share:", e);
       setShareState("IDLE");
       if (e.name === "NotAllowedError") {
         setShareError("Screen sharing was cancelled or blocked by browser permission.");
@@ -758,15 +774,18 @@ function BroadcastControl({ lectureId }: { lectureId: string }) {
   };
 
   const stopScreenShare = async () => {
-    if (shareState === "STOPPING" || !screenTrack) return;
+    if (shareState === "STOPPING") return;
     setShareState("STOPPING");
+    console.log("[FACULTY SCREEN] stopping screen share...");
 
     try {
       if (localParticipant) {
-        localParticipant.unpublishTrack(screenTrack);
+        await localParticipant.setScreenShareEnabled(false);
       }
-      screenTrack.stop();
-      setScreenTrack(null);
+      if (screenTrack) {
+        screenTrack.stop();
+        setScreenTrack(null);
+      }
       
       fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/lectures/${lectureId}/status`, {
         method: "POST",
@@ -774,7 +793,7 @@ function BroadcastControl({ lectureId }: { lectureId: string }) {
         body: JSON.stringify({ status: "WAITING" })
       }).catch(console.error);
     } catch (err) {
-      console.error("[BROADCAST] Error stopping screen share:", err);
+      console.error("[FACULTY SCREEN] Error stopping screen share:", err);
     } finally {
       setShareState("IDLE");
     }
